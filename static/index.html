@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ProjectChat — AI ассистент для проектов</title>
+    
+    <!-- Подключение библиотек -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+    
+    <!-- Fallback для отладки -->
+    <script>
+        // Проверка загрузки библиотек
+        window.addEventListener('load', function() {
+            console.log('Page loaded, checking libraries...');
+            if (typeof marked === 'undefined') {
+                console.error('marked.js not loaded!');
+            } else {
+                console.log('marked.js loaded');
+            }
+            if (typeof hljs === 'undefined') {
+                console.error('highlight.js not loaded!');
+            } else {
+                console.log('highlight.js loaded');
+            }
+            if (typeof pdfjsLib === 'undefined') {
+                console.warn('pdfjsLib not loaded (might be OK)');
+            } else {
+                console.log('pdfjsLib loaded');
+            }
+        });
+    </script>
+    
+    <!-- Подключение локальных скриптов -->
+    <script src="/static/patterns.js?v=2"></script>
+    <script src="/static/anonymizer.js?v=2"></script>
+    
+    <link rel="stylesheet" href="/static/style.css?v=2">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Левая панель: проекты -->
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <h2>Проекты</h2>
+                <div style="display: flex; gap: 4px;">
+                    <button class="btn btn-icon" id="export-projects-btn" title="Экспорт проектов">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="7 10 12 15 17 10"/>
+                            <line x1="12" y1="15" x2="12" y2="3"/>
+                        </svg>
+                    </button>
+                    <button class="btn btn-icon" id="import-projects-btn" title="Импорт проектов">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="7 10 12 15 17 10"/>
+                            <line x1="12" y1="15" x2="12" y2="3"/>
+                        </svg>
+                    </button>
+                    <button class="btn" id="new-project-btn">
+                        <span>+</span> Новый проект
+                    </button>
+                </div>
+            </div>
+            <div class="projects-search">
+                <input type="text" id="projects-search-input" placeholder="Поиск проектов..." class="search-input">
+                <button class="btn-icon" id="projects-search-clear" title="Очистить поиск" style="display: none;">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18"/>
+                        <line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="projects-list" id="projects-list">
+                <!-- Проекты будут загружены здесь -->
+                <div class="loading-placeholder">Загрузка проектов...</div>
+            </div>
+        </div>
+        
+        <!-- Центральная панель -->
+        <div class="main-content">
+            <div class="main-header">
+                <div class="tabs">
+                    <div class="tab active" data-tab="chats">Чаты</div>
+                    <div class="tab" data-tab="documents">Документы</div>
+                </div>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                    <div class="system-status" id="system-status" title="Статус системы">
+                        <div class="status-indicator status-ok"></div>
+                        <span class="status-text">Система активна</span>
+                    </div>
+                    <button class="btn btn-secondary" id="theme-toggle-btn" title="Сменить тему">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="5"/>
+                            <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+                        </svg>
+                    </button>
+                    <button class="btn btn-secondary" id="settings-btn">Настройки</button>
+                </div>
+            </div>
+            
+            <!-- Вкладка чатов -->
+            <div class="tab-content active" id="chats-tab">
+                <div class="chats-container">
+                    <div class="chats-sidebar">
+                        <div class="sidebar-header">
+                            <button class="btn" id="new-chat-btn">+ Новый чат</button>
+                        </div>
+                        <div class="chats-list" id="chats-list">
+                            <!-- Чаты будут загружены здесь -->
+                        </div>
+                    </div>
+                    
+                    <div class="chat-messages">
+                        <div class="messages-container with-pagination" id="messages-container">
+                            <!-- Сообщения будут загружены здесь -->
+                            <div class="welcome-message">
+                                <p>Выберите чат или создайте новый для начала общения.</p>
+                            </div>
+                            <div id="chat-messages">
+                                <!-- Сообщения чата будут здесь -->
+                            </div>
+                            <div id="messages-pagination" class="pagination-container">
+                                <!-- Элементы управления пагинацией будут здесь -->
+                            </div>
+                        </div>
+                        
+                        <div class="documents-selection-container" id="documents-selection-container" style="display: none;">
+                            <div class="documents-selection-header">
+                                <span>Документы для контекста:</span>
+                                <button class="btn-icon" id="toggle-documents-selection" title="Скрыть выбор документов">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M18 15l-6-6-6 6"/>
+                                    </svg>
+                                </button>
+                            </div>
+                            <div class="documents-selection-list" id="documents-selection-list">
+                                <!-- Документы будут загружены здесь -->
+                            </div>
+                        </div>
+                        
+                        <div class="message-input-container">
+                            <div class="message-input-wrapper">
+                                <button class="btn-icon" id="show-documents-selection" title="Выбрать документы для контекста">
+                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293l5.414 5.414a1 1 0 0 1 .293.707V19a2 2 0 0 1-2 2z"/>
+                                    </svg>
+                                </button>
+                                <textarea 
+                                    class="message-input" 
+                                    id="message-input" 
+                                    placeholder="Введите сообщение..."
+                                    rows="1"
+                                ></textarea>
+                                <button class="btn" id="send-message-btn">Отправить</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Вкладка документов -->
+            <div class="tab-content" id="documents-tab">
+                <div class="documents-container with-pagination">
+                    <div class="documents-header">
+                        <button class="btn" id="upload-document-btn">Загрузить документ</button>
+                    </div>
+                    <div class="documents-list" id="documents-list">
+                        <!-- Документы будут загружены здесь -->
+                    </div>
+                    <div id="documents-pagination" class="pagination-container">
+                        <!-- Элементы управления пагинацией будут здесь -->
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Правая панель: артефакты и история промптов -->
+        <div class="rightbar">
+            <div class="sidebar-header">
+                <div class="rightbar-tabs">
+                    <div class="rightbar-tab active" data-tab="artifacts">Артефакты</div>
+                    <div class="rightbar-tab" data-tab="prompt-history">История промптов</div>
+                    <div class="rightbar-tab" data-tab="prompt-templates">Шаблоны промптов</div>
+                </div>
+                <button class="btn btn-secondary" id="save-artifact-btn">Сохранить</button>
+            </div>
+            
+            <div class="rightbar-content">
+                <!-- Вкладка артефактов -->
+                <div class="rightbar-tab-content active" id="artifacts-tab">
+                    <div class="artifacts-list" id="artifacts-list">
+                        <!-- Артефакты будут загружены здесь -->
+                    </div>
+                </div>
+                
+                <!-- Вкладка истории промптов -->
+                <div class="rightbar-tab-content" id="prompt-history-tab">
+                    <div class="prompt-history-list" id="prompt-history-list">
+                        <!-- История промптов будет загружена здесь -->
+                        <div class="loading-placeholder">История промптов загружается...</div>
+                    </div>
+                </div>
+                
+                <!-- Вкладка шаблонов промптов -->
+                <div class="rightbar-tab-content" id="prompt-templates-tab">
+                    <div class="prompt-templates-header">
+                        <button class="btn btn-secondary" id="new-prompt-template-btn">Новый шаблон</button>
+                    </div>
+                    <div class="prompt-templates-list" id="prompt-templates-list">
+                        <!-- Шаблоны промптов будут загружены здесь -->
+                        <div class="loading-placeholder">Шаблоны промптов загружаются...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Модальные окна -->
+    <div class="modal-overlay" id="project-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <div class="modal-title">Новый проект</div>
+                <button class="modal-close" data-modal="project-modal">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label" for="project-name">Название проекта</label>
+                    <input type="text" class="form-input" id="project-name" placeholder="Мой проект">
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="project-goal">Цель проекта</label>
+                    <textarea class="form-input form-textarea" id="project-goal" placeholder="Опишите цель проекта..."></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-modal="project-modal">Отмена</button>
+                <button class="btn" id="create-project-btn">Создать</button>
+            </div>
+        </div>
+    </div>
+    
+    <div class="modal-overlay" id="document-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <div class="modal-title">Загрузка документа</div>
+                <button class="modal-close" data-modal="document-modal">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label" for="document-name">Название документа</label>
+                    <input type="text" class="form-input" id="document-name" placeholder="Документ">
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="document-description">Описание</label>
+                    <textarea class="form-input form-textarea" id="document-description" placeholder="Опишите контекст документа..."></textarea>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Файл</label>
+                    <div class="upload-area" id="document-upload-area">
+                        <p>Перетащите файл сюда или нажмите для выбора</p>
+                        <p style="font-size: 12px; margin-top: 8px;">Поддерживаются PDF и TXT файлы (макс. 20MB)</p>
+                        <input type="file" id="document-file" accept=".pdf,.txt" style="display: none;">
+                    </div>
+                    <div id="file-info" class="hidden">
+                        <p style="margin-top: 8px; font-size: 14px;">
+                            Файл: <span id="file-name"></span> (<span id="file-size"></span>)
+                        </p>
+                        <div id="anonymization-info" class="hidden">
+                            <p style="margin-top: 8px; font-size: 14px; color: var(--accent-color);">
+                                Найдено PII: <span id="pii-count">0</span>
+                            </p>
+                        </div>
+                    </div>
+                </div>
+                <div id="upload-error" class="error-message hidden"></div>
+                <div id="upload-progress" class="hidden">
+                    <p>Обработка файла...</p>
+                    <div style="background-color: var(--bg-secondary); height: 4px; border-radius: 2px; margin-top: 8px;">
+                        <div id="progress-bar" style="background-color: var(--accent-color); height: 100%; width: 0%; border-radius: 2px;"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-modal="document-modal">Отмена</button>
+                <button class="btn" id="upload-document-submit-btn" disabled>Загрузить</button>
+            </div>
+        </div>
+    </div>
+    
+    <div class="modal-overlay" id="settings-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <div class="modal-title">Настройки AI</div>
+                <button class="modal-close" data-modal="settings-modal">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">Провайдер AI</label>
+                    <select class="form-input" id="ai-provider">
+                        <option value="openrouter">OpenRouter</option>
+                        <option value="deepseek">DeepSeek</option>
+                    </select>
+                </div>
+                
+                <div id="openrouter-settings">
+                    <div class="form-group">
+                        <label class="form-label" for="openrouter-api-key">OpenRouter API ключ</label>
+                        <input type="password" class="form-input" id="openrouter-api-key" placeholder="sk-or-...">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="openrouter-model">Модель</label>
+                        <input type="text" class="form-input" id="openrouter-model" placeholder="deepseek/deepseek-chat">
+                    </div>
+                </div>
+                
+                <div id="deepseek-settings" class="hidden">
+                    <div class="form-group">
+                        <label class="form-label" for="deepseek-api-key">DeepSeek API ключ</label>
+                        <input type="password" class="form-input" id="deepseek-api-key" placeholder="sk-...">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="deepseek-model">Модель</label>
+                        <input type="text" class="form-input" id="deepseek-model" placeholder="deepseek-chat">
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label class="form-label" for="ai-temperature">Температура (креативность)</label>
+                    <input type="range" class="form-input" id="ai-temperature" min="0" max="2" step="0.1" value="0.7">
+                    <div class="form-help">0 = детерминированный, 2 = максимально креативный</div>
+                    <div class="temperature-value" id="temperature-value">0.7</div>
+                </div>
+                
+                <div class="form-group">
+                    <label class="form-label" for="max-tokens">Максимум токенов в ответе</label>
+                    <input type="number" class="form-input" id="max-tokens" min="100" max="8000" step="100" value="2000">
+                    <div class="form-help">Ограничивает длину ответа ИИ</div>
+                </div>
+                
+                <div class="form-group">
+                    <label class="form-label" for="context-size">Размер контекста (документов)</label>
+                    <select class="form-input" id="context-size">
+                        <option value="small">Маленький (первые 1000 символов)</option>
+                        <option value="medium" selected>Средний (первые 5000 символов)</option>
+                        <option value="large">Большой (все документы)</option>
+                        <option value="custom">Пользовательский</option>
+                    </select>
+                </div>
+                
+                <div class="form-group hidden" id="custom-context-group">
+                    <label class="form-label" for="custom-context-size">Пользовательский размер (символов)</label>
+                    <input type="number" class="form-input" id="custom-context-size" min="500" max="200000" step="500" value="5000">
+                </div>
+                
+                <div class="form-group">
+                    <label class="form-label">
+                        <input type="checkbox" id="enable-streaming" checked>
+                        Потоковая генерация ответов
+                    </label>
+                    <div class="form-help">Показывать ответ по мере генерации</div>
+                </div>
+                
+                <div class="form-group">
+                    <label class="form-label">
+                        <input type="checkbox" id="auto-save-artifacts">
+                        Автосохранение важных ответов
+                    </label>
+                    <div class="form-help">Автоматически сохранять длинные ответы как артефакты</div>
+                </div>
+                
+                <div id="settings-error" class="error-message hidden"></div>
+                <div id="settings-success" class="success-message hidden"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-modal="settings-modal">Отмена</button>
+                <button class="btn" id="test-api-btn">Проверить ключ</button>
+                <button class="btn" id="save-settings-btn">Сохранить</button>
+            </div>
+        </div>
+    </div>
+    
+    <div class="modal-overlay" id="artifact-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <div class="modal-title">Сохранить артефакт</div>
+                <button class="modal-close" data-modal="artifact-modal">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label" for="artifact-type">Тип артефакта</label>
+                    <select class="form-input" id="artifact-type">
+                        <option value="analysis">Анализ</option>
+                        <option value="summary">Сводка</option>
+                        <option value="plan">План</option>
+                        <option value="report">Отчет</option>
+                        <option value="code">Код</option>
+                        <option value="documentation">Документация</option>
+                        <option value="other">Другое</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="artifact-name">Название артефакта</label>
+                    <input type="text" class="form-input" id="artifact-name" placeholder="Результат анализа">
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="artifact-template">Шаблон (опционально)</label>
+                    <select class="form-input" id="artifact-template">
+                        <option value="">Без шаблона</option>
+                        <option value="analysis-template">Шаблон анализа</option>
+                        <option value="summary-template">Шаблон сводки</option>
+                        <option value="plan-template">Шаблон плана</option>
+                        <option value="report-template">Шаблон отчета</option>
+                    </select>
+                    <div class="form-help">Шаблоны предзаполняют структуру артефакта</div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="artifact-content">Содержимое</label>
+                    <textarea class="form-input form-textarea" id="artifact-content" placeholder="Введите содержимое артефакта..." rows="10"></textarea>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="artifact-tags">Теги (через запятую)</label>
+                    <input type="text" class="form-input" id="artifact-tags" placeholder="анализ, документ, выводы">
+                </div>
+                <div id="artifact-error" class="error-message hidden"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-modal="artifact-modal">Отмена</button>
+                <button class="btn" id="save-artifact-submit-btn">Сохранить</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Модальное окно для шаблонов промптов -->
+    <div class="modal-overlay" id="prompt-template-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <div class="modal-title">Новый шаблон промпта</div>
+                <button class="modal-close" data-modal="prompt-template-modal">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label" for="template-name">Название шаблона</label>
+                    <input type="text" class="form-input" id="template-name" placeholder="Например: Анализ документа">
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="template-content">Содержимое промпта</label>
+                    <textarea class="form-input form-textarea" id="template-content" placeholder="Введите текст промпта..." rows="8"></textarea>
+                    <div class="form-help">Используйте {переменные} для параметров</div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="template-tags">Теги (через запятую)</label>
+                    <input type="text" class="form-input" id="template-tags" placeholder="анализ, документ, сводка">
+                    <div class="form-help">Теги помогают организовать шаблоны</div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="template-description">Описание</label>
+                    <textarea class="form-input form-textarea" id="template-description" placeholder="Описание шаблона..." rows="3"></textarea>
+                </div>
+                <div id="prompt-template-error" class="error-message hidden"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-modal="prompt-template-modal">Отмена</button>
+                <button class="btn" id="save-prompt-template-btn">Сохранить шаблон</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Основной JavaScript - Новая модульная архитектура -->
+    <!-- Уровень 1: Ядро -->
+    <script src="/static/modules/app-config.js" defer></script>
+    <script src="/static/modules/app-state.js" defer></script>
+    <script src="/static/modules/app-utils.js" defer></script>
+    
+    <!-- Уровень 2: UI (должны загружаться перед бизнес-логикой) -->
+    <script src="/static/modules/app-ui-core.js" defer></script>
+    <script src="/static/modules/app-ui-render.js" defer></script>
+    
+    <!-- Уровень 3: Бизнес-логика -->
+    <script src="/static/modules/app-api.js" defer></script>
+    <script src="/static/modules/app-projects.js" defer></script>
+    <script src="/static/modules/app-chats.js" defer></script>
+    
+    <!-- Уровень 4: Инфраструктура -->
+    <script src="/static/modules/app-events.js" defer></script>
+    <script src="/static/app-monitoring.js" defer></script>
+    <script src="/static/app-pagination.js" defer></script>
+    
+    <!-- Уровень 5: Специализированные модули -->
+    <!-- (будут добавлены позже) -->
+    
+    <!-- Уровень 6: Инициализация -->
+    <script src="/static/modules/app-init.js" defer></script>
+    <script src="/static/app-main.js" defer></script>
+</body>
+</html>

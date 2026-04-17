@@ -10,7 +10,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    AI_PROVIDER: str = "openrouter"
+    AI_PROVIDER: str = "deepseek"
 
     OPENROUTER_API_KEY: str = ""
     OPENROUTER_MODEL: str = "openai/gpt-4o-mini"
@@ -20,6 +20,13 @@ class Settings(BaseSettings):
 
     PORT: int = 8000
     DATA_PATH: str = "./data"
+    
+    AUTH_ENABLED: bool = False
+    AUTH_USERNAME: str = "admin"
+    AUTH_PASSWORD: str = ""
+    
+    CORS_ALLOW_ORIGINS: str = "http://localhost:8000,http://127.0.0.1:8000,http://localhost:8002,http://127.0.0.1:8002"
+    MAX_REQUEST_TIMEOUT: int = 60
 
     @property
     def data_path(self) -> Path:

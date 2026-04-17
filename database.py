@@ -5,8 +5,13 @@ from pathlib import Path
 from typing import AsyncGenerator
 
 import aiosqlite
+from dotenv import load_dotenv
 
 from config.settings import get_settings
+from crypto import encrypt_sensitive_data, decrypt_sensitive_data
+
+# Загружаем .env файл
+load_dotenv()
 
 settings = get_settings()
 DB_PATH = str(settings.db_path)
@@ -157,7 +162,15 @@ async def get_document(db: aiosqlite.Connection, doc_id: str) -> dict | None:
     if not row:
         return None
     d = dict(row)
-    d["anonymization_log"] = json.loads(d["anonymization_log"]) if d.get("anonymization_log") else []
+    # Безопасный парсинг anonymization_log
+    if d.get("anonymization_log"):
+        try:
+            d["anonymization_log"] = json.loads(d["anonymization_log"])
+        except json.JSONDecodeError:
+            # Если не JSON, оставляем как строку
+            d["anonymization_log"] = d["anonymization_log"]
+    else:
+        d["anonymization_log"] = []
     return d
 
 
@@ -169,7 +182,15 @@ async def list_documents(db: aiosqlite.Connection, project_id: str) -> list[dict
     result = []
     for r in rows:
         d = dict(r)
-        d["anonymization_log"] = json.loads(d["anonymization_log"]) if d.get("anonymization_log") else []
+        # Безопасный парсинг anonymization_log
+        if d.get("anonymization_log"):
+            try:
+                d["anonymization_log"] = json.loads(d["anonymization_log"])
+            except json.JSONDecodeError:
+                # Если не JSON, оставляем как строку
+                d["anonymization_log"] = d["anonymization_log"]
+        else:
+            d["anonymization_log"] = []
         result.append(d)
     return result
 
@@ -177,6 +198,52 @@ async def list_documents(db: aiosqlite.Connection, project_id: str) -> list[dict
 async def delete_document(db: aiosqlite.Connection, doc_id: str) -> None:
     await db.execute("DELETE FROM documents WHERE id=?", (doc_id,))
     await db.commit()
+
+
+async def count_documents(db: aiosqlite.Connection, project_id: str) -> int:
+    """Подсчет общего количества документов в проекте"""
+    cursor = await db.execute(
+        "SELECT COUNT(*) FROM documents WHERE project_id=?",
+        (project_id,)
+    )
+    result = await cursor.fetchone()
+    return result[0] if result else 0
+
+
+async def list_documents_paginated(
+    db: aiosqlite.Connection, 
+    project_id: str, 
+    offset: int, 
+    limit: int
+) -> list[dict]:
+    """Получение документов с пагинацией"""
+    cursor = await db.execute(
+        """SELECT id, project_id, filename, file_path, file_type, file_size, 
+                  status, created_at, updated_at, description, 
+                  anonymized_path, anonymized_text, anonymization_log,
+                  pii_count
+           FROM documents 
+           WHERE project_id=?
+           ORDER BY created_at DESC
+           LIMIT ? OFFSET ?""",
+        (project_id, limit, offset)
+    )
+    
+    rows = await cursor.fetchall()
+    documents = []
+    
+    for row in rows:
+        doc = dict(row)
+        # Парсим JSON поля
+        if doc.get("anonymization_log"):
+            try:
+                doc["anonymization_log"] = json.loads(doc["anonymization_log"])
+            except (json.JSONDecodeError, TypeError):
+                doc["anonymization_log"] = None
+        
+        documents.append(doc)
+    
+    return documents
 
 
 async def update_document_status(
@@ -250,6 +317,35 @@ async def get_messages(db: aiosqlite.Connection, chat_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def count_messages(db: aiosqlite.Connection, chat_id: str) -> int:
+    """Подсчет общего количества сообщений в чате"""
+    cursor = await db.execute(
+        "SELECT COUNT(*) FROM messages WHERE chat_id=?",
+        (chat_id,)
+    )
+    result = await cursor.fetchone()
+    return result[0] if result else 0
+
+
+async def get_messages_paginated(
+    db: aiosqlite.Connection, 
+    chat_id: str, 
+    offset: int, 
+    limit: int
+) -> list[dict]:
+    """Получение сообщений с пагинацией"""
+    cursor = await db.execute(
+        """SELECT * FROM messages 
+           WHERE chat_id=? 
+           ORDER BY created_at DESC
+           LIMIT ? OFFSET ?""",
+        (chat_id, limit, offset)
+    )
+    
+    rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
+
+
 # ── Artifacts ─────────────────────────────────────────────────────────────────
 
 async def save_artifact(
@@ -286,15 +382,67 @@ async def delete_artifact(db: aiosqlite.Connection, artifact_id: str) -> None:
 
 # ── App settings ──────────────────────────────────────────────────────────────
 
-async def get_setting(db: aiosqlite.Connection, key: str) -> str | None:
+async def get_setting(db: aiosqlite.Connection, key: str, decrypt: bool = True) -> str | None:
+    """
+    Получает настройку из базы данных.
+    
+    Args:
+        db: Соединение с базой данных
+        key: Ключ настройки
+        decrypt: Нужно ли дешифровать значение (по умолчанию True)
+    
+    Returns:
+        Значение настройки или None если не найдено
+    """
     async with db.execute("SELECT value FROM app_settings WHERE key=?", (key,)) as cur:
         row = await cur.fetchone()
-    return row[0] if row else None
+    
+    if row:
+        value = row[0]
+        if decrypt:
+            return decrypt_sensitive_data(key, value)
+        return value
+    return None
 
 
-async def set_setting(db: aiosqlite.Connection, key: str, value: str) -> None:
+async def set_setting(db: aiosqlite.Connection, key: str, value: str, encrypt: bool = True) -> None:
+    """
+    Сохраняет настройку в базу данных.
+    
+    Args:
+        db: Соединение с базой данных
+        key: Ключ настройки
+        value: Значение настройки
+        encrypt: Нужно ли шифровать значение (по умолчанию True)
+    """
+    value_to_store = encrypt_sensitive_data(key, value) if encrypt else value
+    
     await db.execute(
         "INSERT INTO app_settings (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (key, value),
+        (key, value_to_store),
     )
     await db.commit()
+
+
+async def get_all_settings(db: aiosqlite.Connection, decrypt: bool = True) -> dict:
+    """
+    Получает все настройки из базы данных.
+    
+    Args:
+        db: Соединение с базой данных
+        decrypt: Нужно ли дешифровать значения
+    
+    Returns:
+        Словарь всех настроек
+    """
+    settings = {}
+    async with db.execute("SELECT key, value FROM app_settings") as cur:
+        rows = await cur.fetchall()
+        for row in rows:
+            key = row[0]
+            value = row[1]
+            if decrypt:
+                settings[key] = decrypt_sensitive_data(key, value)
+            else:
+                settings[key] = value
+    return settings
