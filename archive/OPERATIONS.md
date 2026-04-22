@@ -10,12 +10,12 @@ cd /home/openclaw/ProjectChat/AI-project-chat-anonimaizer
 ## 2. SSH tunnel from Windows
 
 ```powershell
-ssh -N -L 8002:localhost:8002 -i "C:\Users\VMitrofanov\openclaw\openclaw_key" -p 2222 openclaw@158.160.216.45
+ssh -N -L 8002:localhost:8002 -i "<path_to_private_key>" -p <ssh_port> <vm_user>@<vm_ip>
 ```
 
 ## 3. Smoke gate after each restart
 
-1. Open `http://localhost:8002`.
+1. Open `http://localhost:8002` (or your forwarded local port).
 2. Check `GET /api/health` returns `status=ok`.
 3. Open settings and save provider/model.
 4. Create one test project.
