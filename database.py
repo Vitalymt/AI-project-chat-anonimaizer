@@ -74,7 +74,8 @@ async def init_db() -> None:
                 chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                tool_calls_trace TEXT
             );
 
             CREATE TABLE IF NOT EXISTS artifacts (
@@ -92,6 +93,16 @@ async def init_db() -> None:
                 value TEXT NOT NULL
             );
         """)
+        await db.commit()
+        await _ensure_messages_tool_trace_column(db)
+
+
+async def _ensure_messages_tool_trace_column(db: aiosqlite.Connection) -> None:
+    async with db.execute("PRAGMA table_info(messages)") as cur:
+        rows = await cur.fetchall()
+    col_names = {row[1] for row in rows}
+    if "tool_calls_trace" not in col_names:
+        await db.execute("ALTER TABLE messages ADD COLUMN tool_calls_trace TEXT")
         await db.commit()
 
 
@@ -218,10 +229,9 @@ async def list_documents_paginated(
 ) -> list[dict]:
     """Получение документов с пагинацией"""
     cursor = await db.execute(
-        """SELECT id, project_id, filename, file_path, file_type, file_size, 
-                  status, created_at, updated_at, description, 
-                  anonymized_path, anonymized_text, anonymization_log,
-                  pii_count
+        """SELECT id, project_id, name, description, filename, file_type,
+                  original_path, anonymized_path, anonymized_text, anonymization_log,
+                  created_at, status
            FROM documents 
            WHERE project_id=?
            ORDER BY created_at DESC
@@ -297,16 +307,35 @@ async def delete_chat(db: aiosqlite.Connection, chat_id: str) -> None:
 
 # ── Messages ──────────────────────────────────────────────────────────────────
 
-async def add_message(db: aiosqlite.Connection, chat_id: str, role: str, content: str) -> dict:
+async def add_message(
+    db: aiosqlite.Connection,
+    chat_id: str,
+    role: str,
+    content: str,
+    tool_calls_trace: str | None = None,
+) -> dict:
     mid = _new_id()
     await db.execute(
-        "INSERT INTO messages (id, chat_id, role, content, created_at) VALUES (?,?,?,?,?)",
-        (mid, chat_id, role, content, _now()),
+        "INSERT INTO messages (id, chat_id, role, content, created_at, tool_calls_trace) VALUES (?,?,?,?,?,?)",
+        (mid, chat_id, role, content, _now(), tool_calls_trace),
     )
     await db.commit()
     async with db.execute("SELECT * FROM messages WHERE id=?", (mid,)) as cur:
         row = await cur.fetchone()
-    return dict(row)
+    return _parse_message_row(row)
+
+
+def _parse_message_row(row: aiosqlite.Row) -> dict:
+    d = dict(row)
+    raw_trace = d.get("tool_calls_trace")
+    if raw_trace:
+        try:
+            d["tool_calls_trace"] = json.loads(raw_trace)
+        except (json.JSONDecodeError, TypeError):
+            d["tool_calls_trace"] = None
+    else:
+        d["tool_calls_trace"] = None
+    return d
 
 
 async def get_messages(db: aiosqlite.Connection, chat_id: str) -> list[dict]:
@@ -314,7 +343,7 @@ async def get_messages(db: aiosqlite.Connection, chat_id: str) -> list[dict]:
         "SELECT * FROM messages WHERE chat_id=? ORDER BY created_at ASC", (chat_id,)
     ) as cur:
         rows = await cur.fetchall()
-    return [dict(r) for r in rows]
+    return [_parse_message_row(r) for r in rows]
 
 
 async def count_messages(db: aiosqlite.Connection, chat_id: str) -> int:
@@ -343,7 +372,7 @@ async def get_messages_paginated(
     )
     
     rows = await cursor.fetchall()
-    return [dict(r) for r in rows]
+    return [_parse_message_row(r) for r in rows]
 
 
 # ── Artifacts ─────────────────────────────────────────────────────────────────

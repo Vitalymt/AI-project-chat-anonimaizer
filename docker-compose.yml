@@ -1,0 +1,29 @@
+services:
+  project-chat:
+    build: .
+    container_name: project-chat
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8000}:8000"
+    env_file:
+      - .env
+    environment:
+      OBSIDIAN_VAULT_PATH: /app/vault
+    volumes:
+      - ./data:/app/data
+      - ./obsidian-vault:/app/vault
+
+  webdav:
+    profiles:
+      - vault
+    image: bytemark/webdav:latest
+    container_name: obsidian-webdav
+    restart: unless-stopped
+    ports:
+      - "${WEBDAV_PORT:-8081}:80"
+    environment:
+      AUTH_TYPE: Basic
+      USERNAME: ${WEBDAV_USER:-obsidian}
+      PASSWORD: ${WEBDAV_PASSWORD:-changeme}
+    volumes:
+      - ./obsidian-vault:/var/lib/dav/data

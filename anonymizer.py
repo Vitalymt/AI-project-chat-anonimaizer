@@ -1,5 +1,5 @@
 """
-Russian-language text anonymization using Presidio + spaCy ru_core_news_lg.
+Russian-language text anonymization using Presidio + spaCy ru_core_news_sm.
 
 Lazy initialization: the heavy NLP model is loaded on first call to anonymize(),
 not at module import time.
@@ -52,7 +52,7 @@ def _build_engines():
 
     nlp_configuration = {
         "nlp_engine_name": "spacy",
-        "models": [{"lang_code": "ru", "model_name": "ru_core_news_lg"}],
+        "models": [{"lang_code": "ru", "model_name": "ru_core_news_sm"}],
     }
     provider = NlpEngineProvider(nlp_configuration=nlp_configuration)
     nlp_engine = provider.create_engine()

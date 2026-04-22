@@ -12,7 +12,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Download Russian spaCy model (~500 MB)
-RUN python -m spacy download ru_core_news_lg
+RUN pip install --no-cache-dir https://github.com/explosion/spacy-models/releases/download/ru_core_news_sm-3.7.0/ru_core_news_sm-3.7.0-py3-none-any.whl
 
 COPY . .
 
