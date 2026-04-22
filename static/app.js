@@ -6,8 +6,58 @@ if (typeof appState === 'undefined' && typeof window.appState !== 'undefined') {
     var appState = window.appState;
 }
 
+if (typeof window !== 'undefined' && typeof window.appState === 'undefined') {
+    window.appState = {
+        projects: [],
+        chats: [],
+        documents: [],
+        artifacts: [],
+        selectedDocumentIds: new Set(),
+        currentProjectId: null,
+        currentChatId: null,
+        currentFile: null,
+        anonymizationResult: null,
+        settings: {},
+        streamingChatId: null,
+        currentStreamController: null,
+        timeoutId: null,
+        streamTimeoutReason: null,
+        loadMessagesController: null,
+        loadMessagesRequestId: 0,
+        uiState: {
+            sidebarWidth: 250,
+            rightbarWidth: 300,
+            sidebarCollapsed: false,
+            rightbarCollapsed: false
+        },
+        currentProjectName: '',
+        vaultSavePlainText: '',
+        vaultObserveState: null
+    };
+    appState = window.appState;
+}
+
 // API базовый URL
 const API_BASE = '/api';
+
+const MODEL_PRESETS = {
+    openrouter: [
+        { value: 'deepseek/deepseek-chat', label: 'deepseek/deepseek-chat' },
+        { value: 'openai/gpt-4o-mini', label: 'openai/gpt-4o-mini' },
+        { value: 'anthropic/claude-3.5-sonnet', label: 'anthropic/claude-3.5-sonnet' },
+        { value: '__custom__', label: 'Свой вариант (ввести вручную)' }
+    ],
+    deepseek: [
+        { value: 'deepseek-chat', label: 'deepseek-chat' },
+        { value: 'deepseek-reasoner', label: 'deepseek-reasoner' },
+        { value: '__custom__', label: 'Свой вариант (ввести вручную)' }
+    ]
+};
+
+const settingsState = {
+    openrouterKeyChanged: false,
+    deepseekKeyChanged: false
+};
 
 // Функции для работы с localStorage
 function saveAppState() {
@@ -119,6 +169,47 @@ async function withLoading(operation, message = 'Загрузка...') {
     }
 }
 
+function isAnyStreamActive() {
+    return Boolean(appState.streamingChatId);
+}
+
+function updateStreamingContextHint() {
+    const target = document.getElementById('chat-streaming-status');
+    if (!target) return;
+    if (!appState.streamingChatId || appState.streamingChatId === appState.currentChatId) {
+        target.textContent = '';
+        target.classList.add('hidden');
+        return;
+    }
+    target.textContent = 'Ответ продолжает генерироваться в другом чате';
+    target.classList.remove('hidden');
+}
+
+function resetStreamState() {
+    appState.streamingChatId = null;
+    appState.streamTimeoutReason = null;
+    if (appState.timeoutId) {
+        clearTimeout(appState.timeoutId);
+        appState.timeoutId = null;
+    }
+    appState.currentStreamController = null;
+    updateStreamingContextHint();
+}
+
+function normalizeStreamError(error) {
+    if (appState.streamTimeoutReason === 'timeout') {
+        return 'Превышено время ожидания ответа от ИИ. Попробуйте уточнить запрос или уменьшить объем контекста.';
+    }
+    if (error?.name === 'AbortError') {
+        return 'Запрос отменен.';
+    }
+    const msg = String(error?.message || '');
+    if (msg.includes('BodyStreamBuffer was aborted')) {
+        return 'Соединение со стримом было прервано. Попробуйте отправить сообщение еще раз.';
+    }
+    return `Ошибка при отправке сообщения: ${msg || 'неизвестная ошибка'}`;
+}
+
 // Button loading state
 function setButtonLoading(button, isLoading) {
     if (isLoading) {
@@ -165,10 +256,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         console.log('Calling initializeEventListeners...');
         initializeEventListeners();
         console.log('initializeEventListeners completed');
+        setupThemeManager();
         
         console.log('Calling loadSettings...');
         await loadSettings();
         console.log('loadSettings completed');
+
+        const activeTabId = document.querySelector('.tab.active')?.dataset.tab || 'chats';
+        switchTab(activeTabId);
         
         console.log('Calling loadProjects...');
         await loadProjects();
@@ -205,6 +300,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         console.log('Calling setupMessageInput...');
         setupMessageInput();
         console.log('setupMessageInput completed');
+        setupNetworkMonitoring();
+        updateContextInfo();
         
         console.log('Application initialization complete');
     } catch (error) {
@@ -219,7 +316,394 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 // Инициализация обработчиков событий
-// Функция initializeEventListeners теперь находится в app-core.js
+function initializeEventListeners() {
+    console.log('Setting up event listeners...');
+    
+    // Кнопки вкладок
+    document.querySelectorAll('.tab-btn, .tab').forEach(btn => {
+        btn.addEventListener('click', () => {
+            switchTab(btn.dataset.tab);
+        });
+    });
+    
+    // Кнопка нового проекта
+    const newProjectBtn = document.getElementById('new-project-btn');
+    if (newProjectBtn) {
+        newProjectBtn.addEventListener('click', () => openModal('project-modal'));
+    }
+    
+    // Кнопка нового чата
+    const newChatBtn = document.getElementById('new-chat-btn');
+    if (newChatBtn) {
+        newChatBtn.addEventListener('click', async () => {
+            if (!appState.currentProjectId) {
+                showToast('Сначала выберите проект', 'error', 3000);
+                return;
+            }
+            const name = prompt('Введите название чата:', 'Новый чат');
+            if (name) {
+                await createNewChat(name);
+            }
+        });
+    }
+    
+    // Кнопка загрузки документа
+    const uploadDocBtn = document.getElementById('upload-document-btn');
+    if (uploadDocBtn) {
+        uploadDocBtn.addEventListener('click', () => {
+            if (!appState.currentProjectId) {
+                showToast('Сначала выберите проект', 'error', 3000);
+                return;
+            }
+            openModal('document-modal');
+        });
+    }
+    
+    // Кнопка сохранения артефакта
+    const saveArtifactBtn = document.getElementById('save-artifact-btn');
+    if (saveArtifactBtn) {
+        saveArtifactBtn.addEventListener('click', () => {
+            if (!appState.currentProjectId) {
+                showToast('Сначала выберите проект', 'error', 3000);
+                return;
+            }
+            openModal('artifact-modal');
+        });
+    }
+    
+    // Кнопка настроек
+    const settingsBtn = document.getElementById('settings-btn');
+    if (settingsBtn) {
+        settingsBtn.addEventListener('click', () => {
+            openModal('settings-modal');
+            loadSettingsIntoForm();
+        });
+    }
+    
+    // Кнопка сохранения настроек
+    const saveSettingsBtn = document.getElementById('save-settings-btn');
+    if (saveSettingsBtn) {
+        saveSettingsBtn.addEventListener('click', async () => {
+            await saveSettings();
+        });
+    }
+    
+    // Кнопка тестирования API
+    const testApiBtn = document.getElementById('test-api-btn');
+    if (testApiBtn) {
+        testApiBtn.addEventListener('click', async () => {
+            await testApiKey();
+        });
+    }
+
+    const providerSelect = document.getElementById('ai-provider');
+    if (providerSelect) {
+        providerSelect.addEventListener('change', () => {
+            toggleProviderSettings();
+        });
+    }
+
+    const contextSizeSelect = document.getElementById('context-size');
+    if (contextSizeSelect) {
+        contextSizeSelect.addEventListener('change', () => {
+            updateContextSizeVisibility();
+        });
+    }
+
+    const openrouterModelSelect = document.getElementById('openrouter-model-select');
+    if (openrouterModelSelect) {
+        openrouterModelSelect.addEventListener('change', () => updateModelCustomVisibility('openrouter'));
+    }
+    const deepseekModelSelect = document.getElementById('deepseek-model-select');
+    if (deepseekModelSelect) {
+        deepseekModelSelect.addEventListener('change', () => updateModelCustomVisibility('deepseek'));
+    }
+
+    const openrouterKeyInput = document.getElementById('openrouter-api-key');
+    if (openrouterKeyInput) {
+        openrouterKeyInput.addEventListener('input', () => {
+            settingsState.openrouterKeyChanged = openrouterKeyInput.value.trim().length > 0;
+        });
+    }
+    const deepseekKeyInput = document.getElementById('deepseek-api-key');
+    if (deepseekKeyInput) {
+        deepseekKeyInput.addEventListener('input', () => {
+            settingsState.deepseekKeyChanged = deepseekKeyInput.value.trim().length > 0;
+        });
+    }
+    
+    // Закрытие модальных окон
+    document.querySelectorAll('.modal-close, .btn-secondary[data-dismiss], [data-modal]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const explicitModalId = btn.dataset.modal;
+            if (explicitModalId) {
+                closeModal(explicitModalId);
+                return;
+            }
+            const modal = btn.closest('.modal-overlay');
+            if (modal && modal.id) closeModal(modal.id);
+        });
+    });
+
+    const createProjectBtn = document.getElementById('create-project-btn');
+    if (createProjectBtn) {
+        createProjectBtn.addEventListener('click', async () => {
+            await createProject();
+        });
+    }
+
+    const uploadDocumentSubmitBtn = document.getElementById('upload-document-submit-btn');
+    if (uploadDocumentSubmitBtn) {
+        uploadDocumentSubmitBtn.addEventListener('click', async () => {
+            await uploadDocument();
+        });
+    }
+
+    const saveArtifactSubmitBtn = document.getElementById('save-artifact-submit-btn');
+    if (saveArtifactSubmitBtn) {
+        saveArtifactSubmitBtn.addEventListener('click', async () => {
+            await saveArtifact();
+        });
+    }
+
+    const sendMessageBtn = document.getElementById('send-message-btn');
+    if (sendMessageBtn) {
+        sendMessageBtn.addEventListener('click', async () => {
+            await sendMessage();
+        });
+    }
+
+    const messagesContainer = document.getElementById('messages-container');
+    if (messagesContainer) {
+        messagesContainer.addEventListener('click', (e) => {
+            const btn = e.target.closest('.save-to-vault-btn');
+            const observeBtn = e.target.closest('.observe-to-obsidian-btn');
+            if (!btn && !observeBtn) return;
+            const wrap = (btn || observeBtn).closest('.message-assistant');
+            const mc = wrap && wrap.querySelector('.message-content');
+            if (!mc) return;
+            if (observeBtn) {
+                const plain = mc.innerText || '';
+                const path = buildVaultObservePath();
+                const statusNode = document.createElement('div');
+                statusNode.className = 'vault-observe-status';
+                statusNode.textContent = `Запись в vault выполняется: ${path}`;
+                wrap.appendChild(statusNode);
+                (async () => {
+                    try {
+                        const meta = await writeVaultInChunks(path, plain, 2200);
+                        statusNode.textContent = `Файл обновлен (${meta.write_mode}). Нажмите Sync в Obsidian (или дождитесь авто-синхронизации 10-30 сек): ${path}`;
+                        if (document.querySelector('.tab.tab-vault.active')) {
+                            await loadVaultPanel();
+                        }
+                    } catch (err) {
+                        statusNode.textContent = `Ошибка записи в vault: ${err.message || String(err)}`;
+                    }
+                })();
+                return;
+            }
+            appState.vaultSavePlainText = mc.innerText || '';
+            const pathInp = document.getElementById('vault-save-path');
+            if (pathInp) pathInp.value = suggestedVaultSavePath();
+            const errEl = document.getElementById('vault-save-error');
+            if (errEl) {
+                errEl.textContent = '';
+                errEl.classList.add('hidden');
+            }
+            const radios = document.querySelectorAll('input[name="vault-save-mode"]');
+            radios.forEach((r) => { r.checked = r.value === 'overwrite'; });
+            openModal('vault-save-modal');
+        });
+    }
+
+    const vaultRefresh = document.getElementById('vault-refresh-btn');
+    if (vaultRefresh) {
+        vaultRefresh.addEventListener('click', () => loadVaultPanel());
+    }
+    const vaultReindex = document.getElementById('vault-reindex-btn');
+    if (vaultReindex) {
+        vaultReindex.addEventListener('click', async () => {
+            try {
+                await apiRequest(`/vault/reindex?project_id=${encodeURIComponent(appState.currentProjectId || '')}`, { method: 'POST' });
+                showSuccess('Vault пересканирован');
+                await loadVaultPanel();
+            } catch (err) {
+                showError('Не удалось пересканировать vault');
+            }
+        });
+    }
+    const vaultSearch = document.getElementById('vault-search-input');
+    if (vaultSearch) {
+        vaultSearch.addEventListener('input', debounce((e) => {
+            runVaultSearchQuery(e.target.value);
+        }, 400));
+    }
+    const vaultHowtoBtn = document.getElementById('vault-howto-btn');
+    if (vaultHowtoBtn) {
+        vaultHowtoBtn.addEventListener('click', () => {
+            const txt = [
+                'Чтобы наблюдать наполнение заметок:',
+                '1) Откройте Obsidian на Windows и настройте Remotely Save (WebDAV).',
+                '2) Включите короткий интервал синка (10-30 сек).',
+                '3) Нажмите "Наблюдать в Obsidian" под ответом AI.',
+                '4) Для мгновенного обновления нажмите Sync в Obsidian.'
+            ].join('\n');
+            showToast(txt, 'info', 9000);
+        });
+    }
+
+    const entityHint = document.getElementById('entity-model-hint');
+    const entityHintToggle = document.getElementById('entity-model-hint-toggle');
+    if (entityHint && entityHintToggle) {
+        const saved = localStorage.getItem('entity_model_hint_expanded');
+        const expanded = saved === 'true';
+        entityHint.classList.toggle('collapsed', !expanded);
+        entityHintToggle.textContent = expanded ? 'Скрыть модель данных' : 'Показать модель данных';
+        entityHintToggle.addEventListener('click', () => {
+            const isCollapsed = entityHint.classList.toggle('collapsed');
+            const isExpanded = !isCollapsed;
+            localStorage.setItem('entity_model_hint_expanded', String(isExpanded));
+            entityHintToggle.textContent = isExpanded ? 'Скрыть модель данных' : 'Показать модель данных';
+        });
+    }
+
+    const vaultSaveSubmit = document.getElementById('vault-save-submit-btn');
+    if (vaultSaveSubmit) {
+        vaultSaveSubmit.addEventListener('click', async () => {
+            const path = (document.getElementById('vault-save-path')?.value || '').trim();
+            const modeRadio = document.querySelector('input[name="vault-save-mode"]:checked');
+            const mode = modeRadio ? modeRadio.value : 'overwrite';
+            const errEl = document.getElementById('vault-save-error');
+            if (!path) {
+                if (errEl) {
+                    errEl.textContent = 'Укажите путь к файлу';
+                    errEl.classList.remove('hidden');
+                }
+                return;
+            }
+            const content = appState.vaultSavePlainText || '';
+            try {
+                const saved = await apiRequest(`/vault/note?project_id=${encodeURIComponent(appState.currentProjectId || '')}`, {
+                    method: 'POST',
+                    body: JSON.stringify({ path, content, mode }),
+                });
+                closeModal('vault-save-modal');
+                showSuccess(`Сохранено в Vault (manual): ${saved.path || path}`);
+                if (document.querySelector('.tab.tab-vault.active')) {
+                    loadVaultPanel();
+                }
+            } catch (e) {
+                if (errEl) {
+                    errEl.textContent = e.message || String(e);
+                    errEl.classList.remove('hidden');
+                }
+            }
+        });
+    }
+    
+    // Поиск проектов
+    const projectsSearch = document.getElementById('projects-search-input');
+    if (projectsSearch) {
+        projectsSearch.addEventListener('input', debounce((e) => {
+            filterProjects(e.target.value);
+        }, 300));
+    }
+    
+    // Поиск чатов
+    const chatsSearch = document.getElementById('chats-search-input');
+    if (chatsSearch) {
+        chatsSearch.addEventListener('input', debounce((e) => {
+            filterChats(e.target.value);
+        }, 300));
+    }
+    
+    // Кнопки документов
+    const selectAllDocsBtn = document.getElementById('select-all-documents-btn');
+    if (selectAllDocsBtn) {
+        selectAllDocsBtn.addEventListener('click', () => {
+            appState.selectedDocumentIds = new Set(appState.documents.map(d => d.id));
+            saveAppState();
+            renderDocuments();
+        });
+    }
+    
+    const deselectAllDocsBtn = document.getElementById('deselect-all-documents-btn');
+    if (deselectAllDocsBtn) {
+        deselectAllDocsBtn.addEventListener('click', () => {
+            appState.selectedDocumentIds = new Set();
+            saveAppState();
+            renderDocuments();
+        });
+    }
+    
+    const useSelectedDocsBtn = document.getElementById('use-selected-documents-btn');
+    if (useSelectedDocsBtn) {
+        useSelectedDocsBtn.addEventListener('click', () => {
+            if (appState.selectedDocumentIds.size === 0) {
+                showToast('Сначала выберите документы', 'error', 3000);
+                return;
+            }
+            if (!appState.currentChatId) {
+                showToast('Сначала выберите чат', 'error', 3000);
+                return;
+            }
+            showToast(`Добавлено ${appState.selectedDocumentIds.size} документов в контекст`, 'success', 3000);
+        });
+    }
+    
+    // Экспорт проектов
+    const exportProjectsBtn = document.getElementById('export-projects-btn');
+    if (exportProjectsBtn) {
+        exportProjectsBtn.addEventListener('click', () => {
+            exportProjects();
+        });
+    }
+    
+    // Импорт проектов
+    const importProjectsBtn = document.getElementById('import-projects-btn');
+    if (importProjectsBtn) {
+        importProjectsBtn.addEventListener('click', () => {
+            document.getElementById('import-projects-file').click();
+        });
+    }
+    
+    const importProjectsFile = document.getElementById('import-projects-file');
+    if (importProjectsFile) {
+        importProjectsFile.addEventListener('change', (e) => {
+            importProjects(e.target.files[0]);
+            e.target.value = '';
+        });
+    }
+    
+    // Форма создания проекта
+    const createProjectForm = document.getElementById('create-project-form');
+    if (createProjectForm) {
+        createProjectForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            await createProject();
+        });
+    }
+    
+    // Форма загрузки документа
+    const uploadDocumentForm = document.getElementById('upload-document-form');
+    if (uploadDocumentForm) {
+        uploadDocumentForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            await uploadDocument();
+        });
+    }
+    
+    // Форма сохранения артефакта
+    const saveArtifactForm = document.getElementById('save-artifact-form');
+    if (saveArtifactForm) {
+        saveArtifactForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            await saveArtifact();
+        });
+    }
+    
+    console.log('Event listeners set up successfully');
+}
 
 // Переключение вкладок
 function switchTab(tabId) {
@@ -237,6 +721,16 @@ function switchTab(tabId) {
     if (tabId === 'documents' && appState.currentProjectId) {
         loadDocuments();
     }
+    if (tabId === 'vault') {
+        loadVaultPanel();
+    }
+}
+
+function highlightCodeBlocks(container) {
+    if (typeof hljs === 'undefined' || !container) return;
+    container.querySelectorAll('pre code').forEach((block) => {
+        hljs.highlightElement(block);
+    });
 }
 
 // Управление модальными окнами
@@ -271,10 +765,18 @@ function closeModal(modalId) {
 // Настройка поля ввода сообщения
 function setupMessageInput() {
     const textarea = document.getElementById('message-input');
+    if (!textarea) return;
     
     textarea.addEventListener('input', () => {
         textarea.style.height = 'auto';
         textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px';
+    });
+
+    textarea.addEventListener('keydown', async (event) => {
+        if (event.key === 'Enter' && !event.shiftKey) {
+            event.preventDefault();
+            await sendMessage();
+        }
     });
 }
 
@@ -294,6 +796,14 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+function debounce(fn, delay = 300) {
+    let t = null;
+    return function debounced(...args) {
+        clearTimeout(t);
+        t = setTimeout(() => fn.apply(this, args), delay);
+    };
+}
+
 // Функция рендеринга markdown с поддержкой копирования кода
 function renderMarkdown(content) {
     if (typeof marked === 'undefined') {
@@ -301,13 +811,23 @@ function renderMarkdown(content) {
     }
     
     try {
-        // Сначала экранируем HTML, затем рендерим markdown
-        const escaped = escapeHtml(content);
-        const rendered = marked.parse(escaped);
+        const rendered = marked.parse(content || '');
         
         // Добавляем кнопки копирования для блоков кода
         const tempDiv = document.createElement('div');
         tempDiv.innerHTML = rendered;
+
+        // Минимальная клиентская санация HTML
+        tempDiv.querySelectorAll('script, style, iframe, object, embed').forEach(el => el.remove());
+        tempDiv.querySelectorAll('*').forEach(el => {
+            [...el.attributes].forEach(attr => {
+                const name = attr.name.toLowerCase();
+                const value = String(attr.value || '').toLowerCase();
+                if (name.startsWith('on') || value.startsWith('javascript:')) {
+                    el.removeAttribute(attr.name);
+                }
+            });
+        });
         
         // Находим все блоки кода с подсветкой синтаксиса
         tempDiv.querySelectorAll('pre code').forEach(codeBlock => {
@@ -449,8 +969,14 @@ function showConfirm(message, options = {}) {
         const cancelBtn = dialog.querySelector('.confirm-button.cancel');
         const confirmBtn = dialog.querySelector(`.confirm-button.${type}`);
         
+        let closed = false;
         const closeDialog = (result) => {
-            document.body.removeChild(overlay);
+            if (closed) return;
+            closed = true;
+            document.removeEventListener('keydown', handleEscape);
+            if (overlay.parentNode) {
+                overlay.parentNode.removeChild(overlay);
+            }
             resolve(result);
         };
         
@@ -468,7 +994,6 @@ function showConfirm(message, options = {}) {
         const handleEscape = (e) => {
             if (e.key === 'Escape') {
                 closeDialog(false);
-                document.removeEventListener('keydown', handleEscape);
             }
         };
         document.addEventListener('keydown', handleEscape);
@@ -480,13 +1005,6 @@ function showConfirm(message, options = {}) {
         // Focus confirm button
         setTimeout(() => confirmBtn.focus(), 100);
         
-        // Cleanup event listener when dialog closes
-        overlay.addEventListener('click', function cleanup(e) {
-            if (e.target === overlay || e.target === cancelBtn || e.target === confirmBtn) {
-                document.removeEventListener('keydown', handleEscape);
-                overlay.removeEventListener('click', cleanup);
-            }
-        });
     });
 }
 
@@ -555,10 +1073,13 @@ async function apiRequest(endpoint, options = {}, retries = 3, retryDelay = 1000
             
             return await response.json();
         } catch (error) {
+            if (error?.name === 'AbortError') {
+                throw error;
+            }
             console.error(`API request failed (attempt ${attempt}/${retries}):`, error);
             
             // Если это последняя попытка или ошибка не связана с сетью, выбрасываем ошибку
-            if (attempt === retries || error.message.includes('Failed to fetch') === false) {
+            if (attempt === retries || !error.message.includes('Failed to fetch')) {
                 // Показываем понятное сообщение об ошибке
                 let userMessage = 'Ошибка при выполнении запроса';
                 
@@ -599,15 +1120,31 @@ function setupNetworkMonitoring() {
     window.addEventListener('online', () => {
         showToast('Соединение восстановлено', 'success', 3000);
         // Автоматически перезагружаем данные при восстановлении соединения
+        loadSettings();
         if (appState.currentProjectId) {
             loadProjects();
             loadDocuments();
+        }
+        if (document.querySelector('.tab.tab-vault.active')) {
+            loadVaultPanel();
         }
     });
     
     window.addEventListener('offline', () => {
         showError('Потеряно соединение с интернетом', 'error', 0);
     });
+}
+
+function updateContextInfo() {
+    const docsInfo = document.getElementById('chat-context-docs');
+    const sizeInfo = document.getElementById('chat-context-size');
+    if (docsInfo) {
+        docsInfo.textContent = `Документы в контексте: ${appState.selectedDocumentIds.size}`;
+    }
+    if (sizeInfo) {
+        const ctx = appState.settings?.CONTEXT_SIZE || 'medium';
+        sizeInfo.textContent = `Режим контекста: ${ctx}`;
+    }
 }
 
 // Функции валидации форм
@@ -872,6 +1409,7 @@ async function selectProject(projectId) {
     // Загружаем данные проекта
     try {
         const projectData = await apiRequest(`/projects/${projectId}`);
+        appState.currentProjectName = projectData.name || '';
         appState.chats = projectData.chats || [];
         appState.documents = projectData.documents || [];
         appState.artifacts = projectData.artifacts || [];
@@ -888,6 +1426,7 @@ async function selectProject(projectId) {
             );
             selectChat(sortedChats[0].id);
         }
+        updateContextInfo();
         
         // Обновляем заголовок
         document.querySelector('.main-header .tab.active').click();
@@ -983,6 +1522,7 @@ async function selectChat(chatId) {
     
     // Загружаем сообщения
     await loadMessages(chatId);
+    updateStreamingContextHint();
     
     // Загружаем историю промптов если активна соответствующая вкладка
     const activeRightbarTab = document.querySelector('.rightbar-tab.active');
@@ -993,11 +1533,26 @@ async function selectChat(chatId) {
 
 // Загрузка сообщений
 async function loadMessages(chatId) {
+    const requestId = ++appState.loadMessagesRequestId;
+    if (appState.loadMessagesController) {
+        appState.loadMessagesController.abort();
+    }
+    appState.loadMessagesController = new AbortController();
     try {
-        const messages = await apiRequest(`/projects/${appState.currentProjectId}/chats/${chatId}/messages`);
+        const messages = await apiRequest(`/projects/${appState.currentProjectId}/chats/${chatId}/messages`, {
+            signal: appState.loadMessagesController.signal
+        });
+        if (requestId !== appState.loadMessagesRequestId || chatId !== appState.currentChatId) {
+            return;
+        }
         renderMessages(messages);
     } catch (error) {
+        if (error?.name === 'AbortError') return;
         showError('Не удалось загрузить сообщения');
+    } finally {
+        if (requestId === appState.loadMessagesRequestId) {
+            appState.loadMessagesController = null;
+        }
     }
 }
 
@@ -1009,10 +1564,31 @@ function renderMessages(messages) {
         container.innerHTML = '<div class="welcome-message"><p>Начните диалог</p></div>';
         return;
     }
+
+    function assistantFooter(msg) {
+        if (msg.role !== 'assistant') return '';
+        const parts = [];
+        if (msg.tool_calls_trace) {
+            parts.push(renderMemoryStatus(msg.tool_calls_trace));
+            parts.push(renderVaultTraceBlock(msg.tool_calls_trace));
+        }
+        if (appState.settings && appState.settings.OBSIDIAN_ENABLED) {
+            parts.push(`
+                <div class="message-actions">
+                    <button type="button" class="btn btn-secondary btn-sm save-to-vault-btn">Сохранить в Vault (ручное)</button>
+                    <button type="button" class="btn btn-secondary btn-sm observe-to-obsidian-btn">Пошаговая запись в Obsidian</button>
+                </div>
+                ${renderObserveStatus(msg.vault_write_meta || null)}
+            `);
+        }
+        if (!parts.length) return '';
+        return `<div class="message-footer">${parts.join('')}</div>`;
+    }
     
     container.innerHTML = messages.map(msg => `
         <div class="message message-${msg.role}">
             <div class="message-content">${renderMarkdown(msg.content)}</div>
+            ${assistantFooter(msg)}
         </div>
     `).join('');
     
@@ -1020,11 +1596,11 @@ function renderMessages(messages) {
     container.scrollTop = container.scrollHeight;
     
     // Применяем подсветку синтаксиса
-    hljs.highlightAll();
+    highlightCodeBlocks(container);
 }
 
 // Создание нового чата
-async function createNewChat() {
+async function createNewChat(chatName = null) {
     if (!appState.currentProjectId) {
         showError('Сначала выберите проект');
         return;
@@ -1033,7 +1609,7 @@ async function createNewChat() {
     try {
         const chat = await apiRequest(`/projects/${appState.currentProjectId}/chats`, {
             method: 'POST',
-            body: JSON.stringify({ name: `Чат от ${new Date().toLocaleDateString()}` })
+            body: JSON.stringify({ name: chatName || `Чат от ${new Date().toLocaleDateString()}` })
         });
         
         appState.chats.push(chat);
@@ -1049,14 +1625,10 @@ async function createNewChat() {
 // Функция для отмены текущего запроса
 function cancelCurrentRequest() {
     if (appState.currentStreamController) {
+        appState.streamTimeoutReason = 'cancelled';
         appState.currentStreamController.abort();
-        appState.currentStreamController = null;
     }
-    if (appState.timeoutId) {
-        clearTimeout(appState.timeoutId);
-        appState.timeoutId = null;
-    }
-    appState.isStreaming = false;
+    resetStreamState();
     const sendBtn = document.getElementById('send-message-btn');
     if (sendBtn) setButtonLoading(sendBtn, false);
     
@@ -1080,7 +1652,7 @@ async function sendMessage() {
         return;
     }
     
-    if (appState.isStreaming) {
+    if (isAnyStreamActive()) {
         showError('Дождитесь завершения предыдущего ответа');
         return;
     }
@@ -1116,7 +1688,10 @@ async function sendMessage() {
     messagesContainer.scrollTop = messagesContainer.scrollHeight;
     
     // Отправляем сообщение через Fetch API с SSE
-    appState.isStreaming = true;
+    const streamChatId = appState.currentChatId;
+    appState.streamingChatId = streamChatId;
+    appState.streamTimeoutReason = null;
+    updateStreamingContextHint();
     const sendBtn = document.getElementById('send-message-btn');
     setButtonLoading(sendBtn, true);
     
@@ -1155,18 +1730,21 @@ async function sendMessage() {
     
     // Создаем AbortController для возможности отмены
     appState.currentStreamController = new AbortController();
-    
-    // Устанавливаем таймаут на 60 секунд
-    appState.timeoutId = setTimeout(() => {
-        if (appState.isStreaming) {
-            cancelCurrentRequest();
-            showError('Превышено время ожидания ответа от ИИ (60 секунд)');
-        }
-    }, 60000);
+    const streamTimeoutMs = (appState.settings && appState.settings.OBSIDIAN_ENABLED) ? 180000 : 60000;
+    const resetIdleTimer = () => {
+        if (appState.timeoutId) clearTimeout(appState.timeoutId);
+        appState.timeoutId = setTimeout(() => {
+            if (appState.streamingChatId === streamChatId && appState.currentStreamController) {
+                appState.streamTimeoutReason = 'timeout';
+                appState.currentStreamController.abort();
+            }
+        }, streamTimeoutMs);
+    };
+    resetIdleTimer();
     
     try {
         
-        const response = await fetch(`/api/projects/${appState.currentProjectId}/chats/${appState.currentChatId}/messages`, {
+        const response = await fetch(`/api/projects/${appState.currentProjectId}/chats/${streamChatId}/messages`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -1186,7 +1764,8 @@ async function sendMessage() {
         });
         
         if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
+            const errorText = await response.text();
+            throw new Error(`HTTP ${response.status}: ${errorText || 'Ошибка сервера'}`);
         }
         
         if (!response.body) {
@@ -1196,16 +1775,23 @@ async function sendMessage() {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let fullResponse = '';
+        const streamEnabled = enableStreaming !== false;
+        const renderAssistantContent = (contentToRender) => {
+            const messageElement = document.getElementById(assistantMessageId);
+            if (!messageElement) return;
+            const contentEl = messageElement.querySelector('.message-content');
+            if (!contentEl) return;
+            contentEl.innerHTML = renderMarkdown(contentToRender);
+            highlightCodeBlocks(contentEl);
+        };
         
         while (true) {
             const { done, value } = await reader.read();
             
             if (done) {
-                appState.isStreaming = false;
-                const sendBtn = document.getElementById('send-message-btn');
-                if (sendBtn) setButtonLoading(sendBtn, false);
                 break;
             }
+            resetIdleTimer();
             
             const chunk = decoder.decode(value);
             const lines = chunk.split('\n');
@@ -1219,17 +1805,16 @@ async function sendMessage() {
                         const data = JSON.parse(dataStr);
                         
                         if (data.done) {
-                            appState.isStreaming = false;
-                            const sendBtn = document.getElementById('send-message-btn');
-                            if (sendBtn) setButtonLoading(sendBtn, false);
-                            
+                            if (!streamEnabled && fullResponse) {
+                                renderAssistantContent(fullResponse);
+                            }
                             // Убираем кнопку отмены
                             const cancelBtn = document.getElementById('cancel-stream-btn');
                             if (cancelBtn) cancelBtn.remove();
                             
                             // Перезагружаем сообщения из базы чтобы убедиться что все сохранено
-                            if (appState.currentChatId) {
-                                setTimeout(() => loadMessages(appState.currentChatId), 500);
+                            if (streamChatId) {
+                                setTimeout(() => loadMessages(streamChatId), 500);
                             }
                             continue;
                         }
@@ -1242,10 +1827,8 @@ async function sendMessage() {
                             }
                             
                             fullResponse += data.content;
-                            const messageElement = document.getElementById(assistantMessageId);
-                            if (messageElement) {
-                                messageElement.querySelector('.message-content').innerHTML = renderMarkdown(fullResponse);
-                                hljs.highlightAll();
+                            if (streamEnabled) {
+                                renderAssistantContent(fullResponse);
                             }
                             
                             // Прокручиваем вниз
@@ -1259,16 +1842,23 @@ async function sendMessage() {
      }
        } catch (error) {
            console.error('Error in sendMessage:', error);
-           appState.isStreaming = false;
-           const sendBtn = document.getElementById('send-message-btn');
-           if (sendBtn) setButtonLoading(sendBtn, false);
-           cancelCurrentRequest();
-           showError('Ошибка при отправке сообщения: ' + error.message);
+           const normalized = normalizeStreamError(error);
+           showError(normalized);
           
           // Перезагружаем сообщения из базы
-          if (appState.currentChatId) {
-              setTimeout(() => loadMessages(appState.currentChatId), 500);
+          if (streamChatId) {
+              setTimeout(() => loadMessages(streamChatId), 500);
           }
+      } finally {
+          if (appState.timeoutId) {
+              clearTimeout(appState.timeoutId);
+              appState.timeoutId = null;
+          }
+          const sendBtn = document.getElementById('send-message-btn');
+          if (sendBtn) setButtonLoading(sendBtn, false);
+          resetStreamState();
+          const cancelBtn = document.getElementById('cancel-stream-btn');
+          if (cancelBtn) cancelBtn.remove();
       }
 }
 
@@ -1350,16 +1940,17 @@ function renderDocumentsSelection(documents) {
 
 async function loadDocuments() {
     if (!appState.currentProjectId) return;
-    
-    return withLoading(async () => {
-        try {
-            const projectData = await apiRequest(`/projects/${appState.currentProjectId}`);
-            appState.documents = projectData.documents || [];
-            renderDocuments(appState.documents);
-        } catch (error) {
-            showError('Не удалось загрузить документы');
-        }
-    }, 'Загрузка документов...');
+    const container = document.getElementById('documents-list');
+    if (container) {
+        container.innerHTML = '<div class="document-card"><p>Загрузка документов...</p></div>';
+    }
+    try {
+        const projectData = await apiRequest(`/projects/${appState.currentProjectId}`);
+        appState.documents = projectData.documents || [];
+        renderDocuments(appState.documents);
+    } catch (error) {
+        showError('Не удалось загрузить документы');
+    }
 }
 
 function renderDocuments(documents) {
@@ -1667,6 +2258,8 @@ async function deleteDocument(docId) {
         // Удаляем документ из состояния
         appState.documents = appState.documents.filter(doc => doc.id !== docId);
         renderDocuments(appState.documents);
+        appState.selectedDocumentIds.delete(docId);
+        updateContextInfo();
         
         showSuccess('Документ успешно удален');
     } catch (error) {
@@ -1681,11 +2274,11 @@ async function saveArtifact() {
         return;
     }
     
-    const artifactType = document.getElementById('artifact-type').value;
+    const artifactType = document.getElementById('artifact-type')?.value || 'other';
     const name = document.getElementById('artifact-name').value.trim();
     const content = document.getElementById('artifact-content').value.trim();
-    const tags = document.getElementById('artifact-tags').value.trim();
-    const template = document.getElementById('artifact-template').value;
+    const tags = document.getElementById('artifact-tags')?.value.trim() || '';
+    const template = document.getElementById('artifact-template')?.value || '';
     
     if (!name || !content) {
         showError('Заполните обязательные поля');
@@ -1805,7 +2398,7 @@ function previewArtifact(artifact) {
     
     // Создаем модальное окно для предпросмотра
     const modal = document.createElement('div');
-    modal.className = 'modal';
+    modal.className = 'modal dynamic-modal';
     modal.innerHTML = `
         <div class="modal-content">
             <div class="modal-header">
@@ -1852,17 +2445,18 @@ function previewArtifact(artifact) {
     });
     
     // Закрытие по клавише Escape
-    document.addEventListener('keydown', function closeOnEscape(e) {
+    const closeOnEscape = (e) => {
         if (e.key === 'Escape') {
             modal.remove();
             document.removeEventListener('keydown', closeOnEscape);
         }
-    });
+    };
+    document.addEventListener('keydown', closeOnEscape);
     
     // Применяем подсветку синтаксиса
     setTimeout(() => {
         if (typeof hljs !== 'undefined') {
-            hljs.highlightAll();
+            highlightCodeBlocks(modal);
         }
     }, 100);
 }
@@ -2055,6 +2649,224 @@ async function loadSettings() {
                 error: error.message
             });
         }
+    }
+    updateVaultTabVisibility();
+}
+
+function updateVaultTabVisibility() {
+    const diagnostics = appState.settings || {};
+    const enabled = !!diagnostics.OBSIDIAN_ENABLED;
+    document.querySelectorAll('.tab.tab-vault').forEach((el) => {
+        el.classList.toggle('hidden', !enabled);
+    });
+    const activeVault = document.querySelector('.tab.tab-vault.active');
+    if (!enabled && activeVault) {
+        switchTab('chats');
+    }
+
+    const topStatus = document.getElementById('vault-top-status');
+    if (topStatus) {
+        if (enabled) {
+            topStatus.classList.add('hidden');
+            topStatus.textContent = '';
+        } else {
+            topStatus.classList.remove('hidden');
+            topStatus.textContent = 'Vault выключен';
+        }
+    }
+
+    const banner = document.getElementById('vault-disabled-banner');
+    if (banner) {
+        if (enabled) {
+            banner.classList.add('hidden');
+            banner.innerHTML = '';
+        } else {
+            const hint = diagnostics.action_hint || 'Включите OBSIDIAN_ENABLED=true и перезапустите сервис';
+            banner.classList.remove('hidden');
+            banner.innerHTML = `
+                <div class="vault-disabled-title">Vault сейчас отключен</div>
+                <div class="vault-disabled-text">${escapeHtml(hint)}</div>
+            `;
+        }
+    }
+}
+
+function vaultSlug(name) {
+    const s = (name || 'project').replace(/[^\w\u0400-\u04FF\-]+/g, '_').replace(/^_|_$/g, '');
+    return (s || 'project').slice(0, 60);
+}
+
+function suggestedVaultSavePath() {
+    const folder = (appState.settings && appState.settings.VAULT_AI_FOLDER) || 'AI-Generated';
+    const slug = vaultSlug(appState.currentProjectName || 'project');
+    const d = new Date().toISOString().slice(0, 10);
+    const f = folder.replace(/^\/+|\/+$/g, '');
+    return `${f}/${slug}/${d}-response.md`;
+}
+
+function buildVaultObservePath() {
+    const folder = (appState.settings && appState.settings.VAULT_AI_FOLDER) || 'AI-Generated';
+    const slug = vaultSlug(appState.currentProjectName || 'project');
+    const d = new Date().toISOString().slice(0, 10);
+    const f = folder.replace(/^\/+|\/+$/g, '');
+    return `${f}/${slug}/${d}-observe.md`;
+}
+
+async function writeVaultInChunks(path, content, chunkSize = 2400) {
+    const text = String(content || '');
+    if (!text.trim()) {
+        throw new Error('Пустой контент для записи в Obsidian');
+    }
+    const firstChunk = text.slice(0, chunkSize);
+    const first = await apiRequest(`/vault/note?project_id=${encodeURIComponent(appState.currentProjectId || '')}`, {
+        method: 'POST',
+        body: JSON.stringify({ path, content: firstChunk, mode: 'overwrite' }),
+    });
+    for (let i = chunkSize; i < text.length; i += chunkSize) {
+        const chunk = text.slice(i, i + chunkSize);
+        await apiRequest(`/vault/note?project_id=${encodeURIComponent(appState.currentProjectId || '')}`, {
+            method: 'POST',
+            body: JSON.stringify({ path, content: chunk, mode: 'append' }),
+        });
+    }
+    return {
+        write_mode: 'observe',
+        path: first?.path || path,
+    };
+}
+
+function renderObserveStatus(meta) {
+    if (!meta) return '';
+    const updatedAt = meta.updated_at ? new Date(meta.updated_at).toLocaleTimeString() : '—';
+    return `
+        <div class="vault-observe-status">
+            Путь записи: <code>${escapeHtml(meta.path || '')}</code> · Режим: <code>${escapeHtml(meta.mode || 'append')}</code> · Последнее обновление: ${escapeHtml(updatedAt)}
+        </div>
+    `;
+}
+
+function renderMemoryStatus(trace) {
+    const artifact = trace?.artifact;
+    if (!artifact) return '';
+    const written = artifact.artifact_written?.path || '—';
+    const reason = artifact.decision_reason || '—';
+    const writeMode = artifact.write_mode || 'auto';
+    return `
+        <div class="vault-observe-status">
+            Память Vault: <strong>${escapeHtml(artifact.artifact_decision || 'skip')}</strong>
+            · mode: <code>${escapeHtml(writeMode)}</code>
+            · тип: <code>${escapeHtml(artifact.artifact_type || 'n/a')}</code>
+            · путь: <code>${escapeHtml(written)}</code>
+            <div class="vault-trace-args">${escapeHtml(reason)}</div>
+        </div>
+    `;
+}
+
+function renderVaultTraceBlock(trace) {
+    if (!trace || (!trace.calls || !trace.calls.length) && !trace.artifact) {
+        return '';
+    }
+    const rows = (trace.calls || []).map((c) => {
+        const args = JSON.stringify(c.arguments || {});
+        const short = args.length > 180 ? args.slice(0, 180) + '…' : args;
+        const dur = c.duration_ms != null ? `${c.duration_ms}ms` : '—';
+        const status = c.status || (c.error ? 'error' : 'ok');
+        return `<tr>
+            <td>${escapeHtml(c.name || 'tool')}</td>
+            <td><code>${escapeHtml(short)}</code></td>
+            <td>${escapeHtml(dur)}</td>
+            <td>${escapeHtml(status)}</td>
+            <td>${c.error ? `<span class="vault-trace-error">${escapeHtml(String(c.error))}</span>` : '—'}</td>
+        </tr>`;
+    }).join('');
+    const stats = trace.stats || {};
+    const extra = `Прочитано файлов (read_note): ${stats.files_read ?? 0} · заметок в vault: ${stats.total_notes ?? '—'} · оценка токенов навигации: ~${stats.estimated_nav_tokens ?? '—'}`;
+    const budget = stats.budget
+        ? `<div class="vault-trace-stats">Budget: files=${stats.budget.files} sections=${stats.budget.sections} chars=${stats.budget.chars}</div>`
+        : '';
+    const artifact = trace.artifact || null;
+    const artifactBlock = artifact ? `
+        <div class="vault-artifact-decision">
+            Решение записи (auto): <strong>${escapeHtml(artifact.artifact_decision || 'skip')}</strong>
+            · mode: <code>${escapeHtml(artifact.write_mode || 'auto')}</code>
+            · тип: <code>${escapeHtml(artifact.artifact_type || 'n/a')}</code>
+            · confidence: ${escapeHtml(String(artifact.artifact_confidence ?? '—'))}
+            <div class="vault-trace-args">${escapeHtml(artifact.decision_reason || '')}</div>
+            ${artifact.artifact_written ? `<div class="vault-trace-args">Записано: ${escapeHtml(artifact.artifact_written.path || '')}</div>` : ''}
+            ${(artifact.links_created && artifact.links_created.length) ? `<div class="vault-trace-args">Связи: ${escapeHtml(artifact.links_created.join(', '))}</div>` : ''}
+        </div>
+    ` : '';
+    return `
+        <details class="vault-trace-details">
+            <summary>Что читал AI</summary>
+            <div class="vault-trace-body">
+                <table class="vault-trace-table">
+                    <thead>
+                        <tr><th>Инструмент</th><th>Аргументы</th><th>Время</th><th>Статус</th><th>Ошибка</th></tr>
+                    </thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            </div>
+            ${artifactBlock}
+            <div class="vault-trace-stats">${escapeHtml(extra)}</div>
+            ${budget}
+        </details>
+    `;
+}
+
+async function loadVaultPanel() {
+    const treeEl = document.getElementById('vault-tree');
+    const metaEl = document.getElementById('vault-meta-line');
+    if (!treeEl || !metaEl) return;
+    if (!(appState.settings && appState.settings.OBSIDIAN_ENABLED)) {
+        metaEl.textContent = 'Vault отключён в настройках сервера (OBSIDIAN_ENABLED).';
+        treeEl.textContent = '';
+        return;
+    }
+    if (!appState.currentProjectId) {
+        metaEl.textContent = 'Сначала выберите проект для просмотра scoped-vault.';
+        treeEl.textContent = '';
+        return;
+    }
+    metaEl.textContent = 'Загрузка…';
+    try {
+        const status = await apiRequest('/vault/status');
+        const tree = await apiRequest(`/vault/tree?project_id=${encodeURIComponent(appState.currentProjectId || '')}`);
+        const lc = status.last_change ? new Date(status.last_change).toLocaleString() : '—';
+        const st = status.vault_runtime_enabled ? 'включен' : 'выключен';
+        metaEl.textContent = `${status.path} · заметок: ${status.total_notes} · последнее изменение: ${lc} · статус: ${st}`;
+        treeEl.textContent = tree.tree || '';
+    } catch (e) {
+        metaEl.textContent = 'Ошибка: ' + (e.message || String(e));
+        treeEl.textContent = '';
+    }
+}
+
+async function runVaultSearchQuery(q) {
+    const panel = document.getElementById('vault-search-results');
+    if (!panel) return;
+    if (!(appState.settings && appState.settings.OBSIDIAN_ENABLED)) return;
+    if (!appState.currentProjectId) return;
+    if (!q || !q.trim()) {
+        panel.innerHTML = '';
+        return;
+    }
+    panel.innerHTML = '<div class="vault-hit">Поиск…</div>';
+    try {
+        const data = await apiRequest(
+            `/vault/search?project_id=${encodeURIComponent(appState.currentProjectId || '')}&q=${encodeURIComponent(q.trim())}`
+        );
+        const hits = data.results || [];
+        if (hits.length === 0) {
+            panel.innerHTML = '<div class="vault-hit">Ничего не найдено</div>';
+            return;
+        }
+        panel.innerHTML = hits.map((h) => {
+            const ctx = (h.context || []).map((ln) => `<div>${escapeHtml(String(ln.line_no))}: ${escapeHtml(ln.text)}</div>`).join('');
+            return `<div class="vault-hit"><div class="vault-hit-path">${escapeHtml(h.path)}:${h.match_line}</div><div>${escapeHtml(h.match_text)}</div><div class="vault-trace-body">${ctx}</div></div>`;
+        }).join('');
+    } catch (e) {
+        panel.innerHTML = '<div class="vault-hit">Ошибка поиска: ' + escapeHtml(e.message || String(e)) + '</div>';
     }
 }
 
@@ -2356,30 +3168,121 @@ function showErrorInModal(elementId, message) {
     }
 }
 
+function getModelControlIds(provider) {
+    return {
+        selectId: `${provider}-model-select`,
+        customId: `${provider}-model-custom`,
+    };
+}
+
+function ensureModelSelectOptions(provider) {
+    const { selectId } = getModelControlIds(provider);
+    const selectEl = document.getElementById(selectId);
+    if (!selectEl) return;
+    const presets = MODEL_PRESETS[provider] || [];
+    selectEl.innerHTML = presets.map((p) => (
+        `<option value="${escapeHtml(p.value)}">${escapeHtml(p.label)}</option>`
+    )).join('');
+}
+
+function setModelValue(provider, value) {
+    const { selectId, customId } = getModelControlIds(provider);
+    const selectEl = document.getElementById(selectId);
+    const customEl = document.getElementById(customId);
+    if (!selectEl || !customEl) return;
+    const model = (value || '').trim();
+    const presetValues = new Set((MODEL_PRESETS[provider] || []).map((p) => p.value));
+    if (model && presetValues.has(model)) {
+        selectEl.value = model;
+        customEl.value = '';
+        customEl.classList.add('hidden');
+        return;
+    }
+    selectEl.value = '__custom__';
+    customEl.classList.remove('hidden');
+    customEl.value = model;
+}
+
+function getSelectedModel(provider) {
+    const { selectId, customId } = getModelControlIds(provider);
+    const selectEl = document.getElementById(selectId);
+    const customEl = document.getElementById(customId);
+    if (!selectEl) return '';
+    if (selectEl.value === '__custom__') {
+        return (customEl?.value || '').trim();
+    }
+    return (selectEl.value || '').trim();
+}
+
+function updateModelCustomVisibility(provider) {
+    const { selectId, customId } = getModelControlIds(provider);
+    const selectEl = document.getElementById(selectId);
+    const customEl = document.getElementById(customId);
+    if (!selectEl || !customEl) return;
+    customEl.classList.toggle('hidden', selectEl.value !== '__custom__');
+}
+
+function updateProviderKeyStateHints() {
+    const settings = appState.settings || {};
+    const openrouterHint = document.getElementById('openrouter-key-state');
+    const deepseekHint = document.getElementById('deepseek-key-state');
+    if (openrouterHint) {
+        const source = settings.OPENROUTER_API_KEY_SOURCE || 'env';
+        openrouterHint.textContent = settings.OPENROUTER_API_KEY_CONFIGURED
+            ? `Ключ сохранен (${source}). Оставьте поле пустым, чтобы не менять.`
+            : 'Ключ не задан. Укажите ключ и нажмите "Сохранить".';
+    }
+    if (deepseekHint) {
+        const source = settings.DEEPSEEK_API_KEY_SOURCE || 'env';
+        deepseekHint.textContent = settings.DEEPSEEK_API_KEY_CONFIGURED
+            ? `Ключ сохранен (${source}). Оставьте поле пустым, чтобы не менять.`
+            : 'Ключ не задан. Укажите ключ и нажмите "Сохранить".';
+    }
+}
+
 function loadSettingsIntoForm() {
-    const settings = appState.settings;
-    
-    document.getElementById('ai-provider').value = settings.AI_PROVIDER || 'deepseek';
-    document.getElementById('openrouter-api-key').value = settings.OPENROUTER_API_KEY || '';
-    document.getElementById('openrouter-model').value = settings.OPENROUTER_MODEL || 'deepseek/deepseek-chat';
-    document.getElementById('deepseek-api-key').value = settings.DEEPSEEK_API_KEY || '';
-    document.getElementById('deepseek-model').value = settings.DEEPSEEK_MODEL || 'deepseek-chat';
-    
-    // Новые настройки
-    document.getElementById('ai-temperature').value = settings.AI_TEMPERATURE || 0.7;
-    document.getElementById('temperature-value').textContent = settings.AI_TEMPERATURE || 0.7;
-    document.getElementById('max-tokens').value = settings.MAX_TOKENS || 2000;
-    document.getElementById('context-size').value = settings.CONTEXT_SIZE || 'medium';
-    document.getElementById('custom-context-size').value = settings.CUSTOM_CONTEXT_SIZE || 20000;
-    document.getElementById('enable-streaming').checked = settings.ENABLE_STREAMING !== false;
-    document.getElementById('auto-save-artifacts').checked = settings.AUTO_SAVE_ARTIFACTS || false;
-    
+    const settings = appState.settings || {};
+    const setValueIfExists = (id, value) => {
+        const element = document.getElementById(id);
+        if (element) element.value = value;
+    };
+    const setTextIfExists = (id, value) => {
+        const element = document.getElementById(id);
+        if (element) element.textContent = String(value);
+    };
+    const setCheckedIfExists = (id, value) => {
+        const element = document.getElementById(id);
+        if (element) element.checked = Boolean(value);
+    };
+
+    setValueIfExists('ai-provider', settings.AI_PROVIDER || 'deepseek');
+    ensureModelSelectOptions('openrouter');
+    ensureModelSelectOptions('deepseek');
+    setValueIfExists('openrouter-api-key', '');
+    setValueIfExists('deepseek-api-key', '');
+    setModelValue('openrouter', settings.OPENROUTER_MODEL || 'deepseek/deepseek-chat');
+    setModelValue('deepseek', settings.DEEPSEEK_MODEL || 'deepseek-chat');
+    setValueIfExists('ai-temperature', settings.AI_TEMPERATURE || 0.7);
+    setTextIfExists('temperature-value', settings.AI_TEMPERATURE || 0.7);
+    setValueIfExists('max-tokens', settings.MAX_TOKENS || 2000);
+    setValueIfExists('context-size', settings.CONTEXT_SIZE || 'medium');
+    setValueIfExists('custom-context-size', settings.CUSTOM_CONTEXT_SIZE || 20000);
+    setCheckedIfExists('enable-streaming', settings.ENABLE_STREAMING !== false);
+    setCheckedIfExists('auto-save-artifacts', settings.AUTO_SAVE_ARTIFACTS || false);
+    setValueIfExists('vault-autosave-mode', settings.VAULT_AUTOSAVE_MODE || 'structured');
+
+    settingsState.openrouterKeyChanged = false;
+    settingsState.deepseekKeyChanged = false;
+    updateProviderKeyStateHints();
     toggleProviderSettings();
     updateContextSizeVisibility();
+    updateContextInfo();
 }
 
 function toggleProviderSettings() {
-    const provider = document.getElementById('ai-provider').value;
+    const providerInput = document.getElementById('ai-provider');
+    if (!providerInput) return;
+    const provider = providerInput.value;
     
     if (provider === 'openrouter') {
         document.getElementById('openrouter-settings').classList.remove('hidden');
@@ -2388,11 +3291,15 @@ function toggleProviderSettings() {
         document.getElementById('openrouter-settings').classList.add('hidden');
         document.getElementById('deepseek-settings').classList.remove('hidden');
     }
+    updateModelCustomVisibility('openrouter');
+    updateModelCustomVisibility('deepseek');
 }
 
 function updateContextSizeVisibility() {
-    const contextSize = document.getElementById('context-size').value;
+    const contextSizeInput = document.getElementById('context-size');
     const customContextGroup = document.getElementById('custom-context-group');
+    if (!contextSizeInput || !customContextGroup) return;
+    const contextSize = contextSizeInput.value;
     
     if (contextSize === 'custom') {
         customContextGroup.classList.remove('hidden');
@@ -2404,17 +3311,18 @@ function updateContextSizeVisibility() {
 async function saveSettings(event) {
     if (event) event.preventDefault();
     
-    const provider = document.getElementById('ai-provider').value;
-    const openrouterApiKey = document.getElementById('openrouter-api-key').value.trim();
-    const openrouterModel = document.getElementById('openrouter-model').value.trim();
-    const deepseekApiKey = document.getElementById('deepseek-api-key').value.trim();
-    const deepseekModel = document.getElementById('deepseek-model').value.trim();
-    const aiTemperature = document.getElementById('ai-temperature').value;
-    const maxTokens = document.getElementById('max-tokens').value;
-    const contextSize = document.getElementById('context-size').value;
-    const customContextSize = document.getElementById('custom-context-size').value;
-    const enableStreaming = document.getElementById('enable-streaming').checked;
-    const autoSaveArtifacts = document.getElementById('auto-save-artifacts').checked;
+    const provider = document.getElementById('ai-provider')?.value || 'deepseek';
+    const openrouterApiKey = document.getElementById('openrouter-api-key')?.value.trim() || '';
+    const deepseekApiKey = document.getElementById('deepseek-api-key')?.value.trim() || '';
+    const openrouterModel = getSelectedModel('openrouter');
+    const deepseekModel = getSelectedModel('deepseek');
+    const aiTemperature = document.getElementById('ai-temperature')?.value || '0.7';
+    const maxTokens = document.getElementById('max-tokens')?.value || '2000';
+    const contextSize = document.getElementById('context-size')?.value || 'medium';
+    const customContextSize = document.getElementById('custom-context-size')?.value || '20000';
+    const enableStreaming = document.getElementById('enable-streaming')?.checked ?? true;
+    const autoSaveArtifacts = document.getElementById('auto-save-artifacts')?.checked ?? false;
+    const vaultAutosaveMode = document.getElementById('vault-autosave-mode')?.value || 'structured';
     
     // Очищаем предыдущие ошибки
     clearFieldError('ai-temperature');
@@ -2422,6 +3330,8 @@ async function saveSettings(event) {
     clearFieldError('custom-context-size');
     clearFieldError('openrouter-api-key');
     clearFieldError('deepseek-api-key');
+    document.getElementById('settings-success')?.classList.add('hidden');
+    document.getElementById('settings-error')?.classList.add('hidden');
     
     // Валидация
     const validationRules = {
@@ -2429,7 +3339,7 @@ async function saveSettings(event) {
             { type: 'number', fieldName: 'Температура', min: 0, max: 2 }
         ],
         maxTokens: [
-            { type: 'integer', fieldName: 'Максимум токенов', min: 100, max: 8000 }
+            { type: 'integer', fieldName: 'Максимум токенов', min: 100, max: 16000 }
         ]
     };
     
@@ -2465,9 +3375,30 @@ async function saveSettings(event) {
     
     // Показываем ошибки
     if (Object.keys(errors).length > 0) {
+        const fieldMap = {
+            customContextSize: 'custom-context-size',
+            openrouterApiKey: 'openrouter-api-key',
+            deepseekApiKey: 'deepseek-api-key',
+        };
         for (const [field, error] of Object.entries(errors)) {
-            showFieldError(field === 'customContextSize' ? 'custom-context-size' : field, error);
+            showFieldError(fieldMap[field] || field, error);
         }
+        const settingsError = document.getElementById('settings-error');
+        if (settingsError) {
+            settingsError.textContent = 'Проверьте поля формы и попробуйте снова.';
+            settingsError.classList.remove('hidden');
+        }
+        return;
+    }
+
+    if (provider === 'openrouter' && !openrouterModel) {
+        showFieldError('openrouter-model-custom', 'Укажите модель OpenRouter');
+        showErrorInModal('settings-error', 'Для OpenRouter нужно выбрать или ввести модель.');
+        return;
+    }
+    if (provider === 'deepseek' && !deepseekModel) {
+        showFieldError('deepseek-model-custom', 'Укажите модель DeepSeek');
+        showErrorInModal('settings-error', 'Для DeepSeek нужно выбрать или ввести модель.');
         return;
     }
     
@@ -2477,44 +3408,47 @@ async function saveSettings(event) {
     const customContextSizeNum = contextSize === 'custom' ? parseInt(customContextSize) : undefined;
     
     try {
-        // Создаем объект настроек, используя существующие значения если поля пустые
-        const currentSettings = appState.settings || {};
         const settings = {
             AI_PROVIDER: provider,
-            OPENROUTER_API_KEY: openrouterApiKey || currentSettings.OPENROUTER_API_KEY || '',
-            OPENROUTER_MODEL: openrouterModel || currentSettings.OPENROUTER_MODEL || 'deepseek/deepseek-chat',
-            DEEPSEEK_API_KEY: deepseekApiKey || currentSettings.DEEPSEEK_API_KEY || '',
-            DEEPSEEK_MODEL: deepseekModel || currentSettings.DEEPSEEK_MODEL || 'deepseek-chat',
+            OPENROUTER_MODEL: openrouterModel || 'deepseek/deepseek-chat',
+            DEEPSEEK_MODEL: deepseekModel || 'deepseek-chat',
             AI_TEMPERATURE: temperatureNum,
             MAX_TOKENS: maxTokensNum,
             CONTEXT_SIZE: contextSize,
             CUSTOM_CONTEXT_SIZE: customContextSizeNum,
             ENABLE_STREAMING: enableStreaming,
-            AUTO_SAVE_ARTIFACTS: autoSaveArtifacts
+            AUTO_SAVE_ARTIFACTS: autoSaveArtifacts,
+            VAULT_AUTOSAVE_MODE: vaultAutosaveMode
         };
+        if (openrouterApiKey) {
+            settings.OPENROUTER_API_KEY = openrouterApiKey;
+        }
+        if (deepseekApiKey) {
+            settings.DEEPSEEK_API_KEY = deepseekApiKey;
+        }
         
+        const saveBtn = document.getElementById('save-settings-btn');
+        if (saveBtn) setButtonLoading(saveBtn, true);
         await apiRequest('/settings', {
             method: 'POST',
             body: JSON.stringify(settings)
         });
         
-        // Обновляем состояние
-        appState.settings = settings;
+        await loadSettings();
+        loadSettingsIntoForm();
+        updateContextInfo();
         
         // Показываем успех
         document.getElementById('settings-error').classList.add('hidden');
         document.getElementById('settings-success').textContent = 'Настройки успешно сохранены';
         document.getElementById('settings-success').classList.remove('hidden');
         
-        // Закрываем модальное окно через 1 секунду
-        setTimeout(() => {
-            document.getElementById('settings-success').classList.add('hidden');
-            closeModal('settings-modal');
-        }, 1000);
-        
     } catch (error) {
         document.getElementById('settings-error').textContent = `Ошибка: ${error.message}`;
         document.getElementById('settings-error').classList.remove('hidden');
+    } finally {
+        const saveBtn = document.getElementById('save-settings-btn');
+        if (saveBtn) setButtonLoading(saveBtn, false);
     }
 }
 
@@ -2527,13 +3461,18 @@ async function testApiKey(event) {
         : document.getElementById('deepseek-api-key').value.trim();
     
     if (!apiKey) {
-        showError('Введите API ключ для проверки');
+        document.getElementById('settings-error').textContent = 'Введите API ключ в активном провайдере, затем нажмите "Проверить ключ".';
+        document.getElementById('settings-error').classList.remove('hidden');
         return;
     }
     
     try {
-        // Здесь можно добавить реальную проверку API ключа
-        // Например, запрос к /models эндпоинту провайдера
+        const testBtn = document.getElementById('test-api-btn');
+        if (testBtn) setButtonLoading(testBtn, true);
+        await apiRequest('/settings/validate-key', {
+            method: 'POST',
+            body: JSON.stringify({ provider, api_key: apiKey })
+        });
         
         document.getElementById('settings-error').classList.add('hidden');
         document.getElementById('settings-success').textContent = 'API ключ валиден';
@@ -2546,6 +3485,9 @@ async function testApiKey(event) {
     } catch (error) {
         document.getElementById('settings-error').textContent = `Неверный API ключ: ${error.message}`;
         document.getElementById('settings-error').classList.remove('hidden');
+    } finally {
+        const testBtn = document.getElementById('test-api-btn');
+        if (testBtn) setButtonLoading(testBtn, false);
     }
 }
 
@@ -2595,13 +3537,13 @@ function createResizeHandles() {
     rightbar.appendChild(rightbarResizeHandle);
     
     // Настройка ресайза левой панели
-    setupResize(sidebarResizeHandle, sidebar, 'width', 'sidebarWidth', 200, 400);
+    setupResize(sidebarResizeHandle, sidebar, 'width', 'sidebarWidth', 200, 400, 1);
     
-    // Настройка ресайза правой панели
-    setupResize(rightbarResizeHandle, rightbar, 'width', 'rightbarWidth', 200, 400);
+    // Настройка ресайза правой панели (инвертированное направление)
+    setupResize(rightbarResizeHandle, rightbar, 'width', 'rightbarWidth', 200, 400, -1);
 }
 
-function setupResize(handle, element, cssProperty, stateKey, minSize, maxSize) {
+function setupResize(handle, element, cssProperty, stateKey, minSize, maxSize, direction = 1) {
     let isResizing = false;
     let startPosition = 0;
     let startSize = 0;
@@ -2616,7 +3558,7 @@ function setupResize(handle, element, cssProperty, stateKey, minSize, maxSize) {
         const onMouseMove = (e) => {
             if (!isResizing) return;
             
-            const delta = e.clientX - startPosition;
+            const delta = (e.clientX - startPosition) * direction;
             let newSize = startSize + delta;
             
             // Ограничиваем размер
@@ -2713,18 +3655,24 @@ function setupThemeManager() {
     // Загружаем сохраненную тему
     const savedTheme = localStorage.getItem('projectchat_theme') || 'dark';
     applyTheme(savedTheme);
+    updateThemeToggleLabel(savedTheme);
     
     // Настраиваем обработчик клика
     themeToggleBtn.addEventListener('click', () => {
         const currentTheme = document.documentElement.getAttribute('data-theme') || 'dark';
-        const themes = ['dark', 'light', 'blue', 'green'];
-        const currentIndex = themes.indexOf(currentTheme);
-        const nextIndex = (currentIndex + 1) % themes.length;
-        const nextTheme = themes[nextIndex];
+        const nextTheme = currentTheme === 'light' ? 'dark' : 'light';
         
         applyTheme(nextTheme);
         localStorage.setItem('projectchat_theme', nextTheme);
+        updateThemeToggleLabel(nextTheme);
     });
+}
+
+function updateThemeToggleLabel(theme) {
+    const themeToggleBtn = document.getElementById('theme-toggle-btn');
+    if (!themeToggleBtn) return;
+    const mode = theme === 'light' ? 'light' : 'dark';
+    themeToggleBtn.textContent = `Тема: ${mode}`;
 }
 
 function applyTheme(theme) {
@@ -2763,7 +3711,7 @@ function updateSyntaxHighlighting(theme) {
     
     // Переприменяем подсветку
     if (typeof hljs !== 'undefined') {
-        hljs.highlightAll();
+        highlightCodeBlocks(document);
     }
 }
 
@@ -2808,7 +3756,7 @@ async function previewDocument(docId) {
         
         // Создаем улучшенное модальное окно для предпросмотра
         const modal = document.createElement('div');
-        modal.className = 'modal';
+        modal.className = 'modal dynamic-modal';
         modal.innerHTML = `
             <div class="modal-content">
                 <div class="modal-header">
@@ -3101,12 +4049,13 @@ async function previewDocument(docId) {
         });
         
         // Закрытие по клавише Escape
-        document.addEventListener('keydown', function closeOnEscape(e) {
+        const closeOnEscape = (e) => {
             if (e.key === 'Escape') {
                 modal.remove();
                 document.removeEventListener('keydown', closeOnEscape);
             }
-        });
+        };
+        document.addEventListener('keydown', closeOnEscape);
         
     } catch (error) {
         hideLoading();
@@ -3130,7 +4079,7 @@ async function deanonymizeDocument(docId) {
         
         // Создаем модальное окно для показа оригинального текста
         const modal = document.createElement('div');
-        modal.className = 'modal';
+        modal.className = 'modal dynamic-modal';
         modal.innerHTML = `
             <div class="modal-content" style="max-width: 800px;">
                 <div class="modal-header">
