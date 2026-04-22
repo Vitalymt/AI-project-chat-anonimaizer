@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ProjectChat — AI ассистент для проектов</title>
+    <!-- Подключение библиотек -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+    
+    <!-- Подключение локальных скриптов -->
+    <script src="/static/patterns.js"></script>
+    <script src="/static/anonymizer.js"></script>
+    
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Левая панель: проекты -->
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <h2>Проекты</h2>
+                <button class="btn" id="new-project-btn">
+                    <span>+</span> Новый проект
+                </button>
+            </div>
+            <div class="projects-list" id="projects-list">
+                <!-- Проекты будут загружены здесь -->
+                <div class="loading-placeholder">Загрузка проектов...</div>
+            </div>
+        </div>
+        
+        <!-- Центральная панель -->
+        <div class="main-content">
+            <div class="main-header">
+                <div class="tabs">
+                    <div class="tab active" data-tab="chats">Чаты</div>
+                    <div class="tab" data-tab="documents">Документы</div>
+                    <div class="tab tab-vault hidden" data-tab="vault">Vault</div>
+                </div>
+                <div>
+                    <span class="vault-top-status hidden" id="vault-top-status"></span>
+                    <button class="btn btn-secondary" id="theme-toggle-btn" title="Переключить тему">Тема: dark</button>
+                    <button class="btn btn-secondary" id="settings-btn">Настройки</button>
+                </div>
+            </div>
+            
+            <!-- Вкладка чатов -->
+            <div class="tab-content active" id="chats-tab">
+                <div class="vault-disabled-banner hidden" id="vault-disabled-banner"></div>
+                <div class="info-banner collapsed hidden" id="entity-model-hint">
+                    <button type="button" class="info-banner-toggle" id="entity-model-hint-toggle">Показать модель данных</button>
+                    <div class="info-banner-content" id="entity-model-hint-content">
+                        <strong>Модель данных:</strong> Документы = входные источники, Артефакты = результаты внутри сервиса, Vault = внешняя долговременная память (Obsidian).
+                    </div>
+                </div>
+                <div class="chats-container">
+                    <div class="chats-sidebar">
+                        <div class="sidebar-header">
+                            <button class="btn" id="new-chat-btn">+ Новый чат</button>
+                        </div>
+                        <div class="chats-list" id="chats-list">
+                            <!-- Чаты будут загружены здесь -->
+                        </div>
+                    </div>
+                    
+                    <div class="chat-messages">
+                        <div class="messages-container" id="messages-container">
+                            <!-- Сообщения будут загружены здесь -->
+                            <div class="welcome-message">
+                                <p>Выберите чат или создайте новый для начала общения.</p>
+                            </div>
+                        </div>
+                        
+                        <div class="message-input-container">
+                            <div class="chat-context-info" id="chat-context-info">
+                                <span id="chat-context-docs">Документы в контексте: 0</span>
+                                <span id="chat-context-size">Режим контекста: medium</span>
+                                <span id="chat-streaming-status" class="hidden"></span>
+                            </div>
+                            <div class="message-input-wrapper">
+                                <textarea 
+                                    class="message-input" 
+                                    id="message-input" 
+                                    placeholder="Введите сообщение..."
+                                    rows="1"
+                                ></textarea>
+                                <button class="btn" id="send-message-btn">Отправить</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Вкладка документов -->
+            <div class="tab-content" id="documents-tab">
+                <div class="documents-container">
+                    <div class="documents-header">
+                        <button class="btn" id="upload-document-btn">Загрузить документ</button>
+                    </div>
+                    <div class="documents-list" id="documents-list">
+                        <!-- Документы будут загружены здесь -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Вкладка Obsidian Vault -->
+            <div class="tab-content" id="vault-tab">
+                <div class="vault-container">
+                    <div class="vault-toolbar">
+                        <div class="vault-meta" id="vault-meta-line">Загрузка…</div>
+                        <div class="vault-toolbar-row">
+                            <input type="search" class="form-input" id="vault-search-input" placeholder="Поиск по vault…">
+                            <button type="button" class="btn btn-secondary" id="vault-refresh-btn">Обновить</button>
+                            <button type="button" class="btn btn-secondary" id="vault-reindex-btn">Пересканировать</button>
+                            <button type="button" class="btn btn-secondary" id="vault-howto-btn">Как наблюдать</button>
+                        </div>
+                    </div>
+                    <div class="vault-split">
+                        <pre class="vault-tree" id="vault-tree"></pre>
+                        <div class="vault-search-panel" id="vault-search-results"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Правая панель: артефакты -->
+        <div class="rightbar">
+            <div class="sidebar-header">
+                <h2>Артефакты</h2>
+                <button class="btn btn-secondary" id="save-artifact-btn">Сохранить</button>
+            </div>
+            <div class="artifacts-list" id="artifacts-list">
+                <!-- Артефакты будут загружены здесь -->
+            </div>
+        </div>
+    </div>
+    
+    <!-- Модальные окна -->
+    <div class="modal-overlay" id="project-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <div class="modal-title">Новый проект</div>
+                <button class="modal-close" data-modal="project-modal">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label" for="project-name">Название проекта</label>
+                    <input type="text" class="form-input" id="project-name" placeholder="Мой проект">
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="project-goal">Цель проекта</label>
+                    <textarea class="form-input form-textarea" id="project-goal" placeholder="Опишите цель проекта..."></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-modal="project-modal">Отмена</button>
+                <button class="btn" id="create-project-btn">Создать</button>
+            </div>
+        </div>
+    </div>
+    
+    <div class="modal-overlay" id="document-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <div class="modal-title">Загрузка документа</div>
+                <button class="modal-close" data-modal="document-modal">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label" for="document-name">Название документа</label>
+                    <input type="text" class="form-input" id="document-name" placeholder="Документ">
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="document-description">Описание</label>
+                    <textarea class="form-input form-textarea" id="document-description" placeholder="Опишите контекст документа..."></textarea>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Файл</label>
+                    <div class="upload-area" id="document-upload-area">
+                        <p>Перетащите файл сюда или нажмите для выбора</p>
+                        <p style="font-size: 12px; margin-top: 8px;">Поддерживаются PDF и TXT файлы (макс. 20MB)</p>
+                        <input type="file" id="document-file" accept=".pdf,.txt" style="display: none;">
+                    </div>
+                    <div id="file-info" class="hidden">
+                        <p style="margin-top: 8px; font-size: 14px;">
+                            Файл: <span id="file-name"></span> (<span id="file-size"></span>)
+                        </p>
+                        <div id="anonymization-info" class="hidden">
+                            <p style="margin-top: 8px; font-size: 14px; color: var(--accent-color);">
+                                Найдено PII: <span id="pii-count">0</span>
+                            </p>
+                        </div>
+                    </div>
+                </div>
+                <div id="upload-error" class="error-message hidden"></div>
+                <div id="upload-progress" class="hidden">
+                    <p>Обработка файла...</p>
+                    <div style="background-color: var(--bg-secondary); height: 4px; border-radius: 2px; margin-top: 8px;">
+                        <div id="progress-bar" style="background-color: var(--accent-color); height: 100%; width: 0%; border-radius: 2px;"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-modal="document-modal">Отмена</button>
+                <button class="btn" id="upload-document-submit-btn" disabled>Загрузить</button>
+            </div>
+        </div>
+    </div>
+    
+    <div class="modal-overlay" id="settings-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <div class="modal-title">Настройки AI</div>
+                <button class="modal-close" data-modal="settings-modal">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">Провайдер AI</label>
+                    <select class="form-input" id="ai-provider">
+                        <option value="openrouter">OpenRouter</option>
+                        <option value="deepseek">DeepSeek</option>
+                    </select>
+                </div>
+                
+                <div id="openrouter-settings">
+                    <div class="form-group">
+                        <label class="form-label" for="openrouter-api-key">OpenRouter API ключ</label>
+                        <input type="password" class="form-input" id="openrouter-api-key" placeholder="sk-or-...">
+                        <div class="form-help" id="openrouter-key-state"></div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="openrouter-model-select">Модель</label>
+                        <select class="form-input" id="openrouter-model-select"></select>
+                        <input type="text" class="form-input hidden" id="openrouter-model-custom" placeholder="Введите модель вручную">
+                    </div>
+                </div>
+                
+                <div id="deepseek-settings" class="hidden">
+                    <div class="form-group">
+                        <label class="form-label" for="deepseek-api-key">DeepSeek API ключ</label>
+                        <input type="password" class="form-input" id="deepseek-api-key" placeholder="sk-...">
+                        <div class="form-help" id="deepseek-key-state"></div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="deepseek-model-select">Модель</label>
+                        <select class="form-input" id="deepseek-model-select"></select>
+                        <input type="text" class="form-input hidden" id="deepseek-model-custom" placeholder="Введите модель вручную">
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label" for="ai-temperature">Температура</label>
+                    <input type="number" class="form-input" id="ai-temperature" min="0" max="2" step="0.1" value="0.7">
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="max-tokens">Максимум токенов</label>
+                    <input type="number" class="form-input" id="max-tokens" min="100" max="16000" step="100" value="2000">
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="context-size">Размер контекста</label>
+                    <select class="form-input" id="context-size">
+                        <option value="small">small</option>
+                        <option value="medium" selected>medium</option>
+                        <option value="large">large</option>
+                        <option value="custom">custom</option>
+                    </select>
+                </div>
+                <div class="form-group hidden" id="custom-context-group">
+                    <label class="form-label" for="custom-context-size">Пользовательский лимит (символы)</label>
+                    <input type="number" class="form-input" id="custom-context-size" min="500" max="200000" step="500" value="20000">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">
+                        <input type="checkbox" id="enable-streaming" checked> Включить streaming
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">
+                        <input type="checkbox" id="auto-save-artifacts"> Автосохранение артефактов
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="vault-autosave-mode">Автозапись в Vault</label>
+                    <select class="form-input" id="vault-autosave-mode">
+                        <option value="off">off — без автозаписи</option>
+                        <option value="summary">summary-only — только _summary.md</option>
+                        <option value="structured">structured — summary/risks/decisions/analysis</option>
+                    </select>
+                </div>
+                
+                <div id="settings-error" class="error-message hidden"></div>
+                <div id="settings-success" class="success-message hidden"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-modal="settings-modal">Отмена</button>
+                <button class="btn" id="test-api-btn">Проверить ключ</button>
+                <button class="btn" id="save-settings-btn">Сохранить</button>
+            </div>
+        </div>
+    </div>
+    
+    <div class="modal-overlay" id="vault-save-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <div class="modal-title">Сохранить в vault</div>
+                <button class="modal-close" data-modal="vault-save-modal">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label" for="vault-save-path">Путь (.md относительно vault)</label>
+                    <input type="text" class="form-input" id="vault-save-path" placeholder="Projects/MyProject/note.md">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Режим</label>
+                    <label class="form-label"><input type="radio" name="vault-save-mode" value="overwrite" checked> Новый файл / перезаписать</label>
+                    <label class="form-label"><input type="radio" name="vault-save-mode" value="append"> Дописать в конец</label>
+                </div>
+                <div id="vault-save-error" class="error-message hidden"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-modal="vault-save-modal">Отмена</button>
+                <button class="btn" id="vault-save-submit-btn">Сохранить</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="artifact-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <div class="modal-title">Сохранить артефакт</div>
+                <button class="modal-close" data-modal="artifact-modal">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label" for="artifact-name">Название артефакта</label>
+                    <input type="text" class="form-input" id="artifact-name" placeholder="Результат анализа">
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="artifact-content">Содержимое</label>
+                    <textarea class="form-input form-textarea" id="artifact-content" placeholder="Введите содержимое артефакта..."></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-modal="artifact-modal">Отмена</button>
+                <button class="btn" id="save-artifact-submit-btn">Сохранить</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Основной JavaScript -->
+    <script src="/static/app.js"></script>
+</body>
+</html>
