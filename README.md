@@ -460,6 +460,9 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 - **PDF.js** - обработка PDF файлов
 - **CSS Grid/Flexbox** - трехпанельный интерфейс
 
+### Стабилизация состояния UI
+- Для регрессионной проверки сценариев H1/H2/H5/H3-H4 используйте чеклист: `docs/state-stability-checklist.md`
+
 ## Лицензия
 
 MIT
