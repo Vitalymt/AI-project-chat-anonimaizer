@@ -59,6 +59,44 @@ const settingsState = {
     deepseekKeyChanged: false
 };
 
+const stateMetrics = {
+    staleProjectCleared: 0,
+    staleChatCleared: 0,
+    vaultGuardBlocked: 0,
+    sendMessageBlocked: 0
+};
+
+function traceState(event, data = {}) {
+    const payload = { event, ...data, timestamp: new Date().toISOString() };
+    console.info('[state-trace]', payload);
+}
+
+function reconcileAppState(projects) {
+    const safeProjects = Array.isArray(projects) ? projects : [];
+    const hadProjectId = !!appState.currentProjectId;
+    const validProject = safeProjects.find(p => p.id === appState.currentProjectId);
+    if (hadProjectId && !validProject) {
+        appState.currentProjectId = null;
+        appState.currentChatId = null;
+        stateMetrics.staleProjectCleared += 1;
+    }
+
+    if (appState.currentChatId && !appState.currentProjectId) {
+        appState.currentChatId = null;
+        stateMetrics.staleChatCleared += 1;
+    }
+
+    traceState('state-reconciled', {
+        projectsCount: safeProjects.length,
+        staleProjectCleared: stateMetrics.staleProjectCleared,
+        staleChatCleared: stateMetrics.staleChatCleared,
+        currentProjectId: appState.currentProjectId,
+        currentChatId: appState.currentChatId
+    });
+
+    saveAppState();
+}
+
 // Функции для работы с localStorage
 function saveAppState() {
     try {
@@ -227,6 +265,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     // Загружаем сохраненное состояние
     loadAppState();
+    traceState('app-init', { hasStoredProjectId: !!appState.currentProjectId, hasStoredChatId: !!appState.currentChatId });
     
     try {
         // Настройка marked для рендеринга markdown (если библиотека загружена)
@@ -268,34 +307,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         console.log('Calling loadProjects...');
         await loadProjects();
         console.log('loadProjects completed');
-        
-        // Автоматически выбираем сохраненный проект и чат
-        if (appState.currentProjectId) {
-            console.log(`Auto-selecting project: ${appState.currentProjectId}`);
-            try {
-                await selectProject(appState.currentProjectId);
-                
-                // Если есть сохраненный чат, выбираем его
-                if (appState.currentChatId) {
-                    console.log(`Auto-selecting chat: ${appState.currentChatId}`);
-                    // Проверяем что чат существует в текущем проекте
-                    const chatExists = appState.chats.some(chat => chat.id === appState.currentChatId);
-                    if (chatExists) {
-                        await selectChat(appState.currentChatId);
-                    } else {
-                        console.log(`Chat ${appState.currentChatId} not found in project, clearing selection`);
-                        appState.currentChatId = null;
-                        saveAppState();
-                    }
-                }
-            } catch (error) {
-                console.error('Error auto-selecting project/chat:', error);
-                // Если проект не найден, сбрасываем состояние
-                appState.currentProjectId = null;
-                appState.currentChatId = null;
-                saveAppState();
-            }
-        }
         
         console.log('Calling setupMessageInput...');
         setupMessageInput();
@@ -707,21 +718,31 @@ function initializeEventListeners() {
 
 // Переключение вкладок
 function switchTab(tabId) {
-    // Обновляем активную вкладку
     document.querySelectorAll('.tab').forEach(tab => {
         tab.classList.toggle('active', tab.dataset.tab === tabId);
     });
-    
-    // Показываем соответствующее содержимое
+
     document.querySelectorAll('.tab-content').forEach(content => {
         content.classList.toggle('active', content.id === `${tabId}-tab`);
     });
-    
-    // Загружаем данные для активной вкладки
+
     if (tabId === 'documents' && appState.currentProjectId) {
         loadDocuments();
     }
+
     if (tabId === 'vault') {
+        traceState('vault-tab-open-request', { currentProjectId: appState.currentProjectId });
+        if (!appState.currentProjectId) {
+            stateMetrics.vaultGuardBlocked += 1;
+            showToast('Сначала выберите проект, затем открывайте Vault.', 'warning', 3500);
+            document.querySelectorAll('.tab').forEach(tab => {
+                tab.classList.toggle('active', tab.dataset.tab === 'chats');
+            });
+            document.querySelectorAll('.tab-content').forEach(content => {
+                content.classList.toggle('active', content.id === 'chats-tab');
+            });
+            return;
+        }
         loadVaultPanel();
     }
 }
@@ -1336,18 +1357,33 @@ async function loadProjects() {
         try {
             const projects = await apiRequest('/projects');
             appState.projects = projects;
-            
-            // Получаем текущий поисковый запрос
+            traceState('projects-loaded', {
+                projectsCount: Array.isArray(projects) ? projects.length : 0,
+                restoredProjectId: appState.currentProjectId,
+                restoredChatId: appState.currentChatId
+            });
+
+            reconcileAppState(projects);
+
             const searchInput = document.getElementById('projects-search-input');
             const searchTerm = searchInput ? searchInput.value.trim() : '';
-            
             renderProjects(projects, searchTerm);
-            
-            // Если есть проекты, выбираем первый
-            if (projects.length > 0 && !appState.currentProjectId) {
-                await selectProject(projects[0].id);
+
+            if (projects.length > 0) {
+                const targetProjectId = appState.currentProjectId || projects[0].id;
+                await selectProject(targetProjectId, { source: 'loadProjects', suppressErrorToast: true });
+            } else {
+                appState.currentProjectName = '';
+                appState.chats = [];
+                appState.documents = [];
+                appState.artifacts = [];
+                renderChats([]);
+                renderDocuments([]);
+                renderArtifacts([]);
+                updateContextInfo();
             }
         } catch (error) {
+            traceState('projects-load-failed', { error: String(error && error.message ? error.message : error) });
             showError('Не удалось загрузить проекты');
         }
     }, 'Загрузка проектов...');
@@ -1394,44 +1430,79 @@ function renderProjects(projects, searchTerm = '') {
 }
 
 // Выбор проекта
-async function selectProject(projectId) {
+async function selectProject(projectId, options = {}) {
+    const suppressErrorToast = !!options.suppressErrorToast;
+    const source = options.source || 'manual';
+
     appState.currentProjectId = projectId;
     appState.currentChatId = null;
-    
-    // Сохраняем состояние
     saveAppState();
-    
-    // Обновляем UI
+
     document.querySelectorAll('.project-item').forEach(item => {
         item.classList.toggle('active', item.dataset.projectId === projectId);
     });
-    
-    // Загружаем данные проекта
+
     try {
         const projectData = await apiRequest(`/projects/${projectId}`);
+        traceState('project-selected', { projectId, source });
+
         appState.currentProjectName = projectData.name || '';
         appState.chats = projectData.chats || [];
         appState.documents = projectData.documents || [];
         appState.artifacts = projectData.artifacts || [];
-        
+
         renderChats(appState.chats);
         renderDocuments(appState.documents);
         renderArtifacts(appState.artifacts);
-        
-        // Если есть чаты, выбираем первый (последний созданный)
-        if (appState.chats.length > 0) {
-            // Сортируем по дате создания (новые сначала)
-            const sortedChats = [...appState.chats].sort((a, b) => 
+
+        if (appState.currentChatId) {
+            const chatExists = appState.chats.some(chat => chat.id === appState.currentChatId);
+            if (!chatExists) {
+                appState.currentChatId = null;
+                stateMetrics.staleChatCleared += 1;
+                saveAppState();
+            }
+        }
+
+        if (appState.currentChatId) {
+            await selectChat(appState.currentChatId);
+        } else if (appState.chats.length > 0) {
+            const sortedChats = [...appState.chats].sort((a, b) =>
                 new Date(b.created_at) - new Date(a.created_at)
             );
-            selectChat(sortedChats[0].id);
+            await selectChat(sortedChats[0].id);
         }
+
         updateContextInfo();
-        
-        // Обновляем заголовок
-        document.querySelector('.main-header .tab.active').click();
+        document.querySelector('.main-header .tab.active')?.click();
     } catch (error) {
-        showError('Не удалось загрузить данные проекта');
+        const errorText = String(error && error.message ? error.message : error);
+        const isNotFound = errorText.includes('Project not found') || errorText.includes('404');
+
+        if (isNotFound) {
+            appState.currentProjectId = null;
+            appState.currentChatId = null;
+            appState.currentProjectName = '';
+            appState.chats = [];
+            appState.documents = [];
+            appState.artifacts = [];
+            saveAppState();
+            renderProjects(appState.projects || []);
+            renderChats([]);
+            renderDocuments([]);
+            renderArtifacts([]);
+            updateContextInfo();
+            traceState('project-select-invalid', { projectId, source, error: errorText });
+            if (!suppressErrorToast) {
+                showError('Ранее выбранный проект больше недоступен. Выберите или создайте проект.');
+            }
+            return;
+        }
+
+        traceState('project-select-failed', { projectId, source, error: errorText });
+        if (!suppressErrorToast) {
+            showError('Не удалось загрузить данные проекта');
+        }
     }
 }
 
@@ -1640,6 +1711,12 @@ function cancelCurrentRequest() {
 // Отправка сообщения
 async function sendMessage() {
     if (!appState.currentProjectId || !appState.currentChatId) {
+        stateMetrics.sendMessageBlocked += 1;
+        traceState('send-message-blocked', {
+            currentProjectId: appState.currentProjectId,
+            currentChatId: appState.currentChatId,
+            blockedCount: stateMetrics.sendMessageBlocked
+        });
         showError('Сначала выберите проект и чат');
         return;
     }
