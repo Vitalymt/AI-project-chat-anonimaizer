@@ -387,10 +387,7 @@ CREATE TABLE settings (
 
 ## Скриншоты
 
-Скриншоты для портфолио хранятся в `docs/screenshots/`:
-- `overview.png` — общий вид интерфейса
-- `documents.png` — раздел документов
-- `chat-vault.png` — чат и интеграция с vault
+![ProjectChat — AI Assistant for Projects](assets/01_projectchat.png)
 
 ## API эндпоинты
 
